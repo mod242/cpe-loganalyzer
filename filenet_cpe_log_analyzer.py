@@ -544,6 +544,404 @@ def generate_pdf_report(
     print(f"[PDF] Report generated: {output_pdf}")
 
 
+# ---------- HTML report ----------
+
+def generate_html_report(
+    output_html: str,
+    project_title: str,
+    summary: List[Dict[str, Any]],
+    example_rows: List[Dict[str, Any]],
+    daily_counts: Dict[str, int],
+    hourly_counts: Dict[str, int],
+    total_entries: int,
+    time_range: str,
+):
+    """
+    Generate an HTML report with embedded charts and interactive features.
+    """
+    os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
+    
+    # Calculate statistics
+    total_families = len(summary)
+    top_error = summary[0] if summary else {"family": "None", "count": 0}
+    
+    # Group examples by family for easy lookup
+    examples_by_family = defaultdict(list)
+    for ex in example_rows:
+        examples_by_family[ex["family"]].append(ex)
+    
+    # Prepare data for charts (JavaScript arrays)
+    chart_labels = [f'"{s["family"][:50]}..."' if len(s["family"]) > 50 else f'"{s["family"]}"' for s in summary[:10]]
+    chart_counts = [s["count"] for s in summary[:10]]
+    
+    # Time series data
+    daily_labels = sorted(daily_counts.keys())
+    daily_values = [daily_counts[d] for d in daily_labels]
+    
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{project_title}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }}
+        .header h1 {{
+            color: #2c3e50;
+            margin: 0;
+            font-size: 2.5em;
+        }}
+        .header .subtitle {{
+            color: #7f8c8d;
+            margin-top: 10px;
+            font-size: 1.1em;
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }}
+        .stat-card {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }}
+        .stat-card h3 {{
+            margin: 0 0 10px 0;
+            font-size: 1.2em;
+            opacity: 0.9;
+        }}
+        .stat-card .value {{
+            font-size: 2em;
+            font-weight: bold;
+            margin: 0;
+        }}
+        .chart-container {{
+            margin: 40px 0;
+            padding: 20px;
+            background: #fafafa;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }}
+        .chart-title {{
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+            color: #2c3e50;
+        }}
+        .chart-wrapper {{
+            position: relative;
+            height: 400px;
+            margin-bottom: 20px;
+        }}
+        .families-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }}
+        .families-table th {{
+            background: #34495e;
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }}
+        .families-table td {{
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }}
+        .families-table tr:hover {{
+            background-color: #f8f9fa;
+        }}
+        .error-family {{
+            font-family: 'Courier New', monospace;
+            background: #f8f9fa;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border-left: 4px solid #e74c3c;
+        }}
+        .count-badge {{
+            background: #3498db;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }}
+        .examples-section {{
+            margin-top: 40px;
+        }}
+        .example-item {{
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            margin: 15px 0;
+            padding: 15px;
+        }}
+        .example-family {{
+            font-weight: bold;
+            color: #e74c3c;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }}
+        .example-details {{
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #555;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 3px solid #3498db;
+        }}
+        .timestamp {{
+            color: #2980b9;
+            font-weight: bold;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            color: #7f8c8d;
+        }}
+        .toggle-btn {{
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 0.9em;
+        }}
+        .toggle-btn:hover {{
+            background: #2980b9;
+        }}
+        .hidden {{
+            display: none;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{project_title}</h1>
+            <div class="subtitle">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+            <div class="subtitle">Time Range: {time_range}</div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Entries</h3>
+                <div class="value">{total_entries:,}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Error Families</h3>
+                <div class="value">{total_families}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Top Error Count</h3>
+                <div class="value">{top_error["count"]}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Analysis Period</h3>
+                <div class="value">{len(daily_counts)} days</div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Top 10 Error Families</div>
+            <div class="chart-wrapper">
+                <canvas id="topErrorsChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Daily Error Trend</div>
+            <div class="chart-wrapper">
+                <canvas id="dailyTrendChart"></canvas>
+            </div>
+        </div>
+
+        <h2>Error Families Summary</h2>
+        <table class="families-table">
+            <thead>
+                <tr>
+                    <th>Count</th>
+                    <th>Error Family</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>"""
+
+    # Add family rows
+    for i, family_data in enumerate(summary[:20]):  # Top 20 families
+        family_examples = examples_by_family.get(family_data["family"], [])
+        has_examples = len(family_examples) > 0
+        
+        html_content += f"""
+                <tr>
+                    <td><span class="count-badge">{family_data["count"]}</span></td>
+                    <td><div class="error-family">{family_data["family"]}</div></td>
+                    <td>
+                        {"<button class='toggle-btn' onclick='toggleExamples(" + str(i) + ")'>Show Examples</button>" if has_examples else "No examples"}
+                    </td>
+                </tr>"""
+        
+        if has_examples:
+            html_content += f"""
+                <tr id="examples-{i}" class="hidden">
+                    <td colspan="3">
+                        <div style="padding: 15px; background: #f8f9fa;">
+                            <strong>Examples:</strong>"""
+            
+            for ex in family_examples[:3]:  # Show up to 3 examples
+                html_content += f"""
+                            <div class="example-details" style="margin: 10px 0;">
+                                <div><span class="timestamp">{ex["timestamp"]}</span> | {ex["source_file"]}</div>
+                                <div style="margin-top: 5px;">{ex["message"][:200]}{"..." if len(ex["message"]) > 200 else ""}</div>
+                            </div>"""
+            
+            html_content += """
+                        </div>
+                    </td>
+                </tr>"""
+
+    html_content += f"""
+            </tbody>
+        </table>
+
+        <div class="footer">
+            <p>FileNet CPE Log Analyzer - HTML Report</p>
+            <p>Processed {total_entries:,} log entries across {len(daily_counts)} days</p>
+        </div>
+    </div>
+
+    <script>
+        // Top Errors Chart
+        const ctx1 = document.getElementById('topErrorsChart').getContext('2d');
+        new Chart(ctx1, {{
+            type: 'bar',
+            data: {{
+                labels: [{", ".join(chart_labels)}],
+                datasets: [{{
+                    label: 'Error Count',
+                    data: [{", ".join(map(str, chart_counts))}],
+                    backgroundColor: 'rgba(231, 76, 60, 0.7)',
+                    borderColor: 'rgba(231, 76, 60, 1)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{
+                        display: false
+                    }}
+                }},
+                scales: {{
+                    y: {{
+                        beginAtZero: true,
+                        ticks: {{
+                            precision: 0
+                        }}
+                    }},
+                    x: {{
+                        ticks: {{
+                            maxRotation: 45,
+                            minRotation: 45
+                        }}
+                    }}
+                }}
+            }}
+        }});
+
+        // Daily Trend Chart
+        const ctx2 = document.getElementById('dailyTrendChart').getContext('2d');
+        new Chart(ctx2, {{
+            type: 'line',
+            data: {{
+                labels: [{", ".join(f'"{d}"' for d in daily_labels)}],
+                datasets: [{{
+                    label: 'Daily Errors',
+                    data: [{", ".join(map(str, daily_values))}],
+                    borderColor: 'rgba(52, 152, 219, 1)',
+                    backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{
+                        display: false
+                    }}
+                }},
+                scales: {{
+                    y: {{
+                        beginAtZero: true,
+                        ticks: {{
+                            precision: 0
+                        }}
+                    }}
+                }}
+            }}
+        }});
+
+        // Toggle examples function
+        function toggleExamples(index) {{
+            const exampleRow = document.getElementById('examples-' + index);
+            const button = event.target;
+            
+            if (exampleRow.classList.contains('hidden')) {{
+                exampleRow.classList.remove('hidden');
+                button.textContent = 'Hide Examples';
+            }} else {{
+                exampleRow.classList.add('hidden');
+                button.textContent = 'Show Examples';
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+
+    with open(output_html, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"[HTML] Report generated: {output_html}")
+
+
 # ---------- Main ----------
 
 def main():
@@ -589,6 +987,12 @@ def main():
                     help="Title shown on the PDF")
     ap.add_argument("--pdf-landscape", action="store_true",
                     help="Render PDF in landscape orientation (wider tables/charts).")
+
+    # HTML options
+    ap.add_argument("--html-report", default=None,
+                    help="Path to output HTML report (e.g., ./results/report.html)")
+    ap.add_argument("--html-title", default="FileNet CPE Log Analyzer – Report",
+                    help="Title shown on the HTML report")
 
     args = ap.parse_args()
 
@@ -737,6 +1141,26 @@ def main():
             hourly_counts=dict(hourly),
             outdir_for_images=charts_dir,
             landscape_mode=args.pdf_landscape,
+        )
+
+    # HTML (optional)
+    if args.html_report:
+        # Create time range string for display
+        time_range = "All available data"
+        if since_dt or until_dt:
+            start_str = since_dt.strftime("%Y-%m-%d %H:%M") if since_dt else "Beginning"
+            end_str = until_dt.strftime("%Y-%m-%d %H:%M") if until_dt else "Now"
+            time_range = f"{start_str} to {end_str}"
+        
+        generate_html_report(
+            output_html=args.html_report,
+            project_title=args.html_title,
+            summary=summary,
+            example_rows=example_rows,
+            daily_counts=dict(daily),
+            hourly_counts=dict(hourly),
+            total_entries=len(rows),
+            time_range=time_range,
         )
 
 if __name__ == "__main__":

@@ -89,7 +89,9 @@ python filenet_cpe_log_analyzer.py /home/user/analyze \
   --since "24h" \
   --outdir ./results \
   --pdf-report ./results/filenet_cpe_report.pdf \
+  --html-report ./results/filenet_cpe_report.html \
   --pdf-title "FileNet CPE Kubernetes Logs – Last 24h" \
+  --html-title "FileNet CPE Kubernetes Logs – Last 24h" \
   --pdf-landscape
 ```
 
@@ -102,12 +104,33 @@ python filenet_cpe_log_analyzer.py /home/user/analyze \
    ```
    (Only matching logs are streamed locally)
 3. Analyzes the downloaded files
-4. Produces Markdown, CSV, and PDF reports
+4. Produces Markdown, CSV, PDF, and HTML reports
+
+### Quick HTML Export Examples
+
+```bash
+# Generate HTML report for local logs
+python filenet_cpe_log_analyzer.py /path/to/logs \
+  --html-report ./error_analysis.html
+
+# HTML report with custom title and time window
+python filenet_cpe_log_analyzer.py /path/to/logs \
+  --since "7d" \
+  --html-report ./weekly_report.html \
+  --html-title "Weekly FileNet Error Analysis"
+
+# Generate both PDF and HTML reports
+python filenet_cpe_log_analyzer.py /path/to/logs \
+  --pdf-report ./report.pdf \
+  --html-report ./report.html \
+  --outdir ./analysis_results
+```
 
 ---
 
-## 📊 Sample PDF Output
+## 📊 Sample Output Formats
 
+### PDF Report
 The generated PDF includes:
 
 - Title page with timestamp (and optional logo)
@@ -115,6 +138,21 @@ The generated PDF includes:
 - **Error count per day/hour**
 - **Consolidated error table**
 - **Example log messages per family**
+
+**Charts included:**
+- Top error families (horizontal bar chart)
+- Errors per day
+- Errors per hour
+
+### **NEW:** Interactive HTML Report
+The HTML report provides a modern, interactive web-based view with:
+
+- **📈 Interactive Charts**: Bar charts and line graphs using Chart.js
+- **📊 Statistics Dashboard**: Key metrics displayed in attractive cards
+- **🔍 Expandable Error Details**: Click "Show Examples" to view actual log entries
+- **📱 Responsive Design**: Works on desktop, tablet, and mobile
+- **🎨 Professional Styling**: Modern UI with gradients and shadows
+- **⚡ Fast Loading**: Self-contained HTML with embedded CSS and JavaScript
 
 ### Example snippet:
 
@@ -124,10 +162,11 @@ The generated PDF includes:
 | 548 | checkNameCollision / FNRCE0043E (E_NOT_UNIQUE) – Name already exists |
 | 10  | getContent failures (content retrieval) |
 
-**Charts included:**
-- Top error families (horizontal bar chart)
-- Errors per day
-- Errors per hour
+**HTML Features:**
+- Interactive charts (hover for details)
+- Click to expand/collapse example log entries
+- Statistics cards showing totals and trends
+- Professional color scheme and typography
 
 ---
 
@@ -151,6 +190,13 @@ The generated PDF includes:
 | `--pdf-title` | Custom report title |
 | `--pdf-logo` | Optional logo image for title page |
 | `--pdf-landscape` | Generate PDF in landscape orientation (recommended) |
+
+### HTML options
+
+| Option | Description |
+|--------|--------------|
+| `--html-report` | Output path for HTML file (e.g., `./report.html`) |
+| `--html-title` | Custom report title for HTML output |
 
 ### Kubernetes options
 
@@ -182,6 +228,7 @@ The generated PDF includes:
 | `timeseries_family_daily.csv` | Error count per day per family |
 | `timeseries_family_hourly.csv` | Error count per hour per family |
 | `filenet_cpe_report.pdf` | Visual PDF report with charts |
+| `report.html` | **NEW:** Interactive HTML report with embedded charts |
 
 ---
 
@@ -262,6 +309,87 @@ It’s ideal for:
 - Quickly summarizing the most common error families
 
 Inspired by real-world FileNet CPE scaling and migration projects.
+
+---
+
+## 🚀 New Advanced Features
+
+The project now includes several enhanced versions with advanced capabilities:
+
+### Advanced FileNet CPE Log Analyzer (`advanced_filenet_cpe_log_analyzer.py`)
+
+**New Features:**
+- **Configuration Management**: JSON-based configuration files with environment variable support
+- **Performance Monitoring**: Real-time memory usage and processing speed tracking
+- **Enhanced Error Handling**: Automatic encoding detection and graceful error recovery
+- **HTML Reports**: Rich HTML reports with interactive visualizations
+- **Plugin Architecture**: Extensible design for custom normalizers and processors
+- **Advanced Filtering**: More sophisticated filtering and search capabilities
+
+**Configuration System (`config.py`):**
+- Centralized configuration management with validation
+- Environment variable support for CI/CD pipelines
+- Sample configuration generation and validation utilities
+- Support for custom analysis parameters and output formats
+
+### Usage Examples
+
+**Create and use configuration file:**
+```bash
+# Create a sample configuration file
+python config.py --create-sample ./my_config.json
+
+# Use custom configuration
+python advanced_filenet_cpe_log_analyzer.py /path/to/logs --config ./my_config.json
+
+# Validate configuration
+python config.py --validate ./my_config.json
+```
+
+**Environment variables:**
+```bash
+export LOGANALYZER_FILE_PATTERN="*.log"
+export LOGANALYZER_OUTPUT_FORMAT="html"
+export LOGANALYZER_MAX_EXAMPLES="5"
+python advanced_filenet_cpe_log_analyzer.py /path/to/logs
+```
+
+**Performance monitoring:**
+```bash
+python advanced_filenet_cpe_log_analyzer.py /path/to/logs --monitor-performance --verbose
+```
+
+### Configuration Options
+
+The new configuration system supports:
+
+```json
+{
+  "file_pattern": "*.log",
+  "max_file_size_mb": 1000,
+  "encoding": "utf-8",
+  "max_examples": 3,
+  "severity_levels": ["ERROR", "WARN", "WARNING", "FATAL", "SEVERE"],
+  "normalize_messages": true,
+  "max_pattern_length": 200,
+  "progress_interval": 1000,
+  "batch_size": 10000,
+  "enable_parallel_processing": false,
+  "output_format": "both",
+  "chart_dpi": 300,
+  "chart_width": 14,
+  "chart_height": 8,
+  "default_time_window": "24h",
+  "timezone": "UTC"
+}
+```
+
+### New Output Formats
+
+- **HTML Reports**: Interactive HTML reports with embedded charts and filtering
+- **Enhanced JSON**: Structured JSON with performance metrics and metadata
+- **Excel Support**: Export to Excel format (when pandas is available)
+- **Performance Logs**: Detailed performance and memory usage tracking
 
 ---
 
