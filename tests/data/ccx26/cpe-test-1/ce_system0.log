@@ -1,0 +1,31 @@
+IBM Content Platform Engine Version: 26.0.1.0, Build: content-engine-26.0.1-0-0 on cpe-test-1
+        VirtualServer: cpe-test-1, ServerInstance: cpe-test-1
+All times are local; the time zone is Coordinated Universal Time(UTC +00:00)
+Date (UTC +00:00)       Thread   Sub  Category     Sev   Message
+2026-03-02T08:00:00.100 0000001A ENG  FNRCE0000I - INFO  Server startup completed
+2026-03-02T08:05:10.200 0000002B LDAP FNRCE0000W - WARN  LDAP search operation failed: [LDAP: error code 32 - No Such Object]
+2026-03-02T08:05:10.201 0000002B LDAP FNRCE0000I - INFO  Retrying LDAP search operation.
+2026-03-02T09:15:00.300 0000003C API  FNRCE0000E - ERROR Method: getObject failed for object {11111111-2222-3333-4444-555555555555}
+com.filenet.api.exception.EngineRuntimeException: FNRCE0051E: E_OBJECT_NOT_FOUND: Requested item not found. Object identity: {11111111-2222-3333-4444-555555555555}
+	at com.example.engine.retrieve.ObjectRetriever.fetch(ObjectRetriever.java:120)
+	at com.example.engine.retrieve.ObjectRetriever.<init>(ObjectRetriever.java:45)
+	at com.example.engine.broker.RequestBroker.executeSearch(RequestBroker.java:900)
+	at com.example.engine.core.EngineCore.executeChanges(EngineCore.java:700)
+	at com.example.engine.core.EngineCore.dispatch(EngineCore.java:600)
+	at com.example.engine.core.EngineCore.run(EngineCore.java:500)
+2026-03-02T09:15:00.400 0000003C ENG  FNRCE0000I - INFO  Request completed
+2026-03-02T10:20:30.500 0000004D SEC  FNRCE0000E - ERROR [WSIAuthenticatorImpl] login exception: Unable to authenticate user testuser
+2026-03-02T11:00:00.600 0000005E API  FNRCE0000E - ERROR MethodName: checkNameCollision, FNRCE0043E: E_NOT_UNIQUE: A uniqueness requirement has been violated.
+2026-03-02T12:00:00.700 0000006F ENG  FNRCE0000W - WARN  Queue item | dispatch delayed for <sweep> & retry
+IBM Content Platform Engine Version: 26.0.1.0, Build: content-engine-26.0.1-0-0 on cpe-test-1
+        VirtualServer: cpe-test-1, ServerInstance: cpe-test-1
+All times are local; the time zone is Coordinated Universal Time(UTC +00:00)
+Date (UTC +00:00)       Thread   Sub  Category     Sev   Message
+2026-03-02T13:00:00.000 0000001A ENG  FNRCE0000I - INFO  Server startup completed
+2026-03-02T13:30:00.800 00000070 CBR  FNRCE0000E - ERROR Text extraction failed for document
+java.lang.IllegalStateException: converter not available
+	at com.example.cbr.Extractor.run(Extractor.java:10)
+Caused by: com.filenet.api.exception.EngineRuntimeException: FNRCE0001E: E_ACCESS_DENIED: The requester has insufficient access rights.
+	... 12 more
+
+2026-03-02T14:00:00.900 00000071 ENG  FNRCE0000W - WARN  Sweep job reported FNRCE0222W for object store OS1

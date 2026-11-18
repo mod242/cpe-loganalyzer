@@ -8,9 +8,12 @@ Features:
 - Optional: copy ONLY files matching a pattern from Kubernetes
   (kubectl exec + 'find . -print0 | tar --null -T - -czf -' → stream → local 'tar -xzf -').
 - Recursive local scan of log directories by glob pattern.
-- Parse FileNet CPE (Liberty) log lines: "YYYY-MM-DDTHH:MM:SS.mmm ... - LEVEL message".
+- Parse FileNet CPE / IBM Content Cortex (Liberty) log lines:
+  "YYYY-MM-DDTHH:MM:SS.mmm <thread> <sub> <category> - LEVEL message".
+  Continuation lines (stack traces etc.) are attached to the preceding entry.
 - Relative time filters: --since/--until (e.g., "24h", "2d6h", "1w2d", "3h30m", "0h"/"now").
-- Consolidated error families + examples + time series (daily/hourly, overall & per family).
+- Consolidated error families (fixed rules + automatic FNRCE error codes)
+  + examples + time series (daily/hourly, overall & per family).
 - PDF report with charts (top error families, daily and hourly time series).
 - Landscape PDF layout via --pdf-landscape; dynamic table widths; wrapped labels; aspect-ratio image embedding.
 
@@ -24,6 +27,7 @@ Outputs:
   timeseries_family_daily.csv
   timeseries_family_hourly.csv
   (optional) PDF report
+  (optional) HTML report
 """
 
 import argparse
@@ -49,12 +53,68 @@ from matplotlib.dates import DateFormatter
 
 # ---------- Log parsing ----------
 
+# Entry line of ce_system*.log (FileNet CPE 5.5.x/5.7 and IBM Content Cortex 26):
+#   2026-01-15T10:00:00.123 0000004A ENG  FNRCE0000W - WARN  Some message
+#   <timestamp>             <thread> <sub> <category> - <severity> <message>
+# The category column is usually the generic FNRCE0000<sev>; specific error
+# codes appear in the message text or in the following stack trace.
 LOG_LINE_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\s+\S+\s+\S+\s+\S+\s+-\s+(?P<level>\w+)\s+(?P<msg>.*)$"
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\s+(?P<thread>\S+)\s+(?P<sub>\S+)\s+(?P<category>\S+)"
+    r"\s+-\s+(?P<level>\w+)\s+(?P<msg>.*)$"
 )
 
-def normalize_message(msg: str) -> str:
-    """Heuristics to consolidate similar messages into 'families'."""
+# File header written by the CPE at the top of each ce_system*.log (and again
+# after a server restart when the file is appended to), e.g.:
+#   IBM Content Platform Engine Version: 26.0.1.0, Build: ...
+#           VirtualServer: <name>, ServerInstance: <name>
+#   All times are local; the time zone is Coordinated Universal Time(UTC +00:00)
+#   Date (UTC +00:00)       Thread   Sub  Category     Sev   Message
+HEADER_LINE_RE = re.compile(
+    r"^(?:IBM .*Version:|\s*VirtualServer:|All times are |Date \()"
+)
+
+# Maximum number of continuation lines (stack trace etc.) kept per entry.
+MAX_CONTINUATION_LINES = 200
+
+# Default number of continuation lines shown in examples/reports.
+DEFAULT_STACK_LINES = 5
+
+# Specific FileNet error/warning codes. FNRCE0000x is the generic category
+# code of nearly every line and therefore not used as a family.
+FNRCE_CODE_RE = re.compile(r"\b(FNRCE(?!0000)\d{4}[EW])\b")
+FNRCE_CODE_WITH_NAME_RE = re.compile(r"\b(FNRCE(?!0000)\d{4}[EW])\b\s*[:\-]?\s*(E_[A-Z0-9_]+)")
+
+
+def find_fnrce_code(texts) -> Optional[str]:
+    """
+    Return the first specific FNRCE code found in the given texts, formatted as
+    "FNRCE0051E (E_OBJECT_NOT_FOUND)" when the symbolic name follows the code,
+    otherwise just "FNRCE0051E". Returns None if no code is found.
+    """
+    for text in texts:
+        if not text:
+            continue
+        m = FNRCE_CODE_RE.search(text)
+        if not m:
+            continue
+        code = m.group(1)
+        named = FNRCE_CODE_WITH_NAME_RE.search(text, m.start())
+        if named and named.start() == m.start():
+            return f"{code} ({named.group(2)})"
+        return code
+    return None
+
+
+def normalize_message(msg: str, continuation: Optional[List[str]] = None) -> str:
+    """
+    Heuristics to consolidate similar messages into 'families'.
+
+    Order:
+      1. Fixed rules on the first line of the entry (unchanged from 1.0).
+      2. Specific FNRCE error code (FNRCEnnnnE/W) in the message, then in the
+         continuation lines (stack trace) -> family named after the code.
+      3. Fallback: the normalized message text (IDs/GUIDs/numbers masked).
+    """
     m = msg
     m = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "{GUID}", m)
     m = re.sub(r"\b[A-Z0-9]{8,}\b", "{ID}", m)
@@ -76,6 +136,11 @@ def normalize_message(msg: str) -> str:
         return "FNRCE0066E (E_UNEXPECTED_EXCEPTION) – unexpected error"
     if has("TTLStreamReaper"):
         return "TTLStreamReaper scheduling issue"
+
+    code_family = find_fnrce_code([msg]) or find_fnrce_code(continuation or [])
+    if code_family:
+        return code_family
+
     return (m[:140] + "…") if len(m) > 140 else m
 
 
@@ -112,45 +177,116 @@ def parse_relative_delta(expr: Optional[str]):
     return total
 
 
-def parse_logs(logdir: str, pattern: str, since_dt, until_dt):
+def new_parse_stats() -> Dict[str, int]:
+    return {
+        "files": 0,          # files read
+        "lines": 0,          # physical lines read
+        "entries": 0,        # lines matching LOG_LINE_RE (any severity)
+        "header": 0,         # CPE file header lines
+        "blank": 0,          # empty lines
+        "continuation": 0,   # lines attached to the preceding entry
+        "unparsed": 0,       # lines that are neither of the above (before the first entry)
+        "selected": 0,       # WARN/ERROR entries inside the time window
+    }
+
+
+def parse_logs(logdir: str, pattern: str, since_dt, until_dt,
+               stats: Optional[Dict[str, int]] = None,
+               max_continuation: int = MAX_CONTINUATION_LINES):
     """
     Recursively read all files, filter WARN/ERROR, and apply time window.
+
+    Lines that do not start a new entry (stack traces, wrapped messages) are
+    attached to the preceding entry as "continuation" (list of lines, at most
+    max_continuation are kept). Pass a dict from new_parse_stats() as `stats`
+    to get line counters.
     """
     files = sorted(glob.glob(os.path.join(logdir, "**", pattern), recursive=True))
+    files = [fp for fp in files if os.path.isfile(fp)]
     if not files:
         raise SystemExit(f"No log files in {logdir!r} for pattern {pattern!r} (recursive).")
 
+    if stats is None:
+        stats = new_parse_stats()
+
     rows = []
     for fp in files:
+        in_entry = False   # a log entry has been seen and may receive continuation lines
+        current = None     # the selected row receiving continuation lines (None if not selected)
+        file_entries = 0
+        file_lines = 0
         try:
             with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
+                stats["files"] += 1
+                for raw in f:
+                    line = raw.rstrip("\r\n")
+                    file_lines += 1
+                    stats["lines"] += 1
+
                     m = LOG_LINE_RE.match(line)
-                    if not m:
+                    if m:
+                        stats["entries"] += 1
+                        file_entries += 1
+                        in_entry = True
+                        current = None
+                        ts_str = m.group("ts")
+                        level = m.group("level").upper()
+                        msg = m.group("msg")
+                        if level not in ("ERROR", "WARN"):
+                            continue
+                        try:
+                            ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f")
+                        except Exception:
+                            continue
+                        if since_dt and ts < since_dt:
+                            continue
+                        if until_dt and ts > until_dt:
+                            continue
+                        current = {
+                            "timestamp": ts_str,
+                            "level": level,
+                            "message": msg.strip(),
+                            "source_file": os.path.basename(fp),
+                            "continuation": [],
+                        }
+                        rows.append(current)
+                        stats["selected"] += 1
                         continue
-                    ts_str = m.group("ts")
-                    level = m.group("level").upper()
-                    msg = m.group("msg")
-                    if level not in ("ERROR", "WARN"):
+
+                    if HEADER_LINE_RE.match(line):
+                        stats["header"] += 1
+                        in_entry = False
+                        current = None
                         continue
-                    try:
-                        ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f")
-                    except Exception:
+                    if not line.strip():
+                        stats["blank"] += 1
                         continue
-                    if since_dt and ts < since_dt:
-                        continue
-                    if until_dt and ts > until_dt:
-                        continue
-                    rows.append({
-                        "timestamp": ts_str,
-                        "level": level,
-                        "message": msg.strip(),
-                        "source_file": os.path.basename(fp),
-                    })
+                    if in_entry:
+                        stats["continuation"] += 1
+                        if current is not None and len(current["continuation"]) < max_continuation:
+                            current["continuation"].append(line.rstrip())
+                    else:
+                        stats["unparsed"] += 1
         except FileNotFoundError:
             # file rotated/removed while reading
             continue
+        if file_lines and not file_entries:
+            print(f"[Parse] WARNING: no log entries recognized in {fp} "
+                  f"({file_lines} lines) – unexpected line format?")
     return rows
+
+
+def format_parse_stats(stats: Dict[str, int]) -> str:
+    return ("[Parse] files={files} lines={lines} entries={entries} header={header} "
+            "continuation={continuation} blank={blank} unparsed={unparsed} "
+            "selected(WARN/ERROR in window)={selected}").format(**stats)
+
+
+def stack_excerpt(row: Dict[str, Any], max_lines: int) -> List[str]:
+    """First max_lines continuation lines of a row (tabs expanded)."""
+    if max_lines <= 0:
+        return []
+    return [ln.expandtabs(4) for ln in (row.get("continuation") or [])[:max_lines]]
 
 
 def write_csv(path, rows, fieldnames):
@@ -451,6 +587,7 @@ def generate_pdf_report(
     hourly_counts: Dict[str, int],
     outdir_for_images: str,
     landscape_mode: bool,
+    stack_lines: int = DEFAULT_STACK_LINES,
 ):
     try:
         from reportlab.lib import colors
@@ -545,6 +682,17 @@ def generate_pdf_report(
                     msg = msg[:600] + "…"
                 elements.append(Paragraph(f"<b>{html.escape(ex['timestamp'])}</b> — "
                                           f"{html.escape(msg, quote=False)}", styles["BodyText"]))
+                stack = (ex.get("stacktrace") or [])[:max(0, stack_lines)]
+                if stack:
+                    # Long stack lines have few spaces to wrap at; cut them to keep the layout.
+                    def _fmt(ln: str) -> str:
+                        ln = ln if len(ln) <= 180 else ln[:180] + "…"
+                        body_txt = ln.lstrip(" ")
+                        indent = len(ln) - len(body_txt)
+                        return "&nbsp;" * indent + html.escape(body_txt, quote=False)
+                    stack_html = "<br/>".join(_fmt(ln) for ln in stack)
+                    elements.append(Paragraph(f'<font face="Courier" size="7">{stack_html}</font>',
+                                              styles["BodyText"]))
             elements.append(Spacer(1, 10))
 
     doc.build(elements)
@@ -562,6 +710,7 @@ def generate_html_report(
     hourly_counts: Dict[str, int],
     total_entries: int,
     time_range: str,
+    stack_lines: int = DEFAULT_STACK_LINES,
 ):
     """
     Generate an HTML report with embedded charts and interactive features.
@@ -760,6 +909,16 @@ def generate_html_report(
         .hidden {{
             display: none;
         }}
+        .stacktrace {{
+            margin: 6px 0 0 0;
+            padding: 6px 8px;
+            background: #fff;
+            border: 1px dashed #ccc;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #444;
+        }}
     </style>
 </head>
 <body>
@@ -836,10 +995,13 @@ def generate_html_report(
                             <strong>Examples:</strong>"""
             
             for ex in family_examples[:3]:  # Show up to 3 examples
+                stack = (ex.get("stacktrace") or [])[:max(0, stack_lines)]
+                stack_html = (f'\n                                <pre class="stacktrace">{esc(chr(10).join(stack))}</pre>'
+                              if stack else "")
                 html_content += f"""
                             <div class="example-details" style="margin: 10px 0;">
                                 <div><span class="timestamp">{esc(ex["timestamp"])}</span> | {esc(ex["source_file"])}</div>
-                                <div style="margin-top: 5px;">{esc(ex["message"][:200])}{"..." if len(ex["message"]) > 200 else ""}</div>
+                                <div style="margin-top: 5px;">{esc(ex["message"][:200])}{"..." if len(ex["message"]) > 200 else ""}</div>{stack_html}
                             </div>"""
             
             html_content += """
@@ -973,6 +1135,35 @@ def compute_time_window(since: Optional[str], until: Optional[str], now: Optiona
     return since_dt, until_dt
 
 
+def build_example_rows(families: Dict[str, List[Dict[str, Any]]], examples: int,
+                       stack_lines: int) -> List[Dict[str, Any]]:
+    example_rows: List[Dict[str, Any]] = []
+    for fam, items in families.items():
+        for ex in sorted(items, key=lambda rr: rr["timestamp"])[: max(1, examples)]:
+            example_rows.append({
+                "family": fam,
+                "timestamp": ex["timestamp"],
+                "source_file": ex["source_file"],
+                "message": ex["message"],
+                "stacktrace": stack_excerpt(ex, stack_lines),
+            })
+    return example_rows
+
+
+def raw_rows_for_csv(rows: List[Dict[str, Any]], stack_lines: int) -> List[Dict[str, Any]]:
+    """Parsed rows with the first stack_lines continuation lines as one text column."""
+    return [{**r, "stacktrace": "\n".join(stack_excerpt(r, stack_lines))} for r in rows]
+
+
+def example_rows_for_csv(example_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Example rows with the stack excerpt (list) joined into one text column."""
+    return [{**r, "stacktrace": "\n".join(r.get("stacktrace") or [])} for r in example_rows]
+
+
+def _md_cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
 def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser(description="FileNet CPE Log Analyzer (pattern-only K8s copy + PDF report)")
     ap.add_argument("logdir",
@@ -982,6 +1173,9 @@ def main(argv: Optional[List[str]] = None):
                     help='Local glob pattern (default: "*.log")')
     ap.add_argument("--examples", type=int, default=3,
                     help="Example rows per error family")
+    ap.add_argument("--stack-lines", type=int, default=DEFAULT_STACK_LINES,
+                    help="Number of stack trace / continuation lines shown per example "
+                         f"(default: {DEFAULT_STACK_LINES}, 0 = none)")
     ap.add_argument("--outdir", default=".",
                     help="Output directory")
     ap.add_argument("--since", default=None,
@@ -1062,29 +1256,25 @@ def main(argv: Optional[List[str]] = None):
     since_dt, until_dt = compute_time_window(args.since, args.until)
 
     # Analysis
-    rows = parse_logs(analysis_dir, args.pattern, since_dt, until_dt)
+    stats = new_parse_stats()
+    rows = parse_logs(analysis_dir, args.pattern, since_dt, until_dt, stats=stats)
+    print(format_parse_stats(stats))
     raw_csv = os.path.join(args.outdir, "raw_errors.csv")
-    write_csv(raw_csv, rows, ["timestamp", "level", "source_file", "message"])
+    write_csv(raw_csv, raw_rows_for_csv(rows, args.stack_lines),
+              ["timestamp", "level", "source_file", "message", "stacktrace"])
 
     families: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        families[normalize_message(r["message"])].append(r)
+        families[normalize_message(r["message"], r.get("continuation"))].append(r)
 
     summary = [{"family": fam, "count": len(items)} for fam, items in families.items()]
     summary.sort(key=lambda x: x["count"], reverse=True)
     write_csv(os.path.join(args.outdir, "summary.csv"), summary, ["count", "family"])
 
-    example_rows: List[Dict[str, Any]] = []
-    for fam, items in families.items():
-        for ex in sorted(items, key=lambda rr: rr["timestamp"])[: max(1, args.examples)]:
-            example_rows.append({
-                "family": fam,
-                "timestamp": ex["timestamp"],
-                "source_file": ex["source_file"],
-                "message": ex["message"]
-            })
+    example_rows = build_example_rows(families, args.examples, args.stack_lines)
     write_csv(os.path.join(args.outdir, "examples.csv"),
-              example_rows, ["family", "timestamp", "source_file", "message"])
+              example_rows_for_csv(example_rows),
+              ["family", "timestamp", "source_file", "message", "stacktrace"])
 
     # Time series
     def parse_ts(ts_str: str):
@@ -1144,7 +1334,13 @@ def main(argv: Optional[List[str]] = None):
             md.write(f"### {fam}\n\n")
             md.write("| Timestamp | Logfile | Example message |\n|-----------|---------|------------------|\n")
             for ex in examples_by_fam.get(fam, [])[: max(1, args.examples)]:
-                safe = ex['message'].replace("|", "\\|")
+                safe = _md_cell(ex['message'])
+                stack = ex.get("stacktrace") or []
+                if stack:
+                    # Table cells cannot contain newlines: render the stack excerpt with <br>.
+                    safe += "<br>" + "<br>".join(
+                        "<code>" + _md_cell(html.escape(ln.strip(), quote=False)) + "</code>" for ln in stack
+                    )
                 md.write(f"| {ex['timestamp']} | {ex['source_file']} | {safe} |\n")
             md.write("\n")
 
@@ -1164,6 +1360,7 @@ def main(argv: Optional[List[str]] = None):
             hourly_counts=dict(hourly),
             outdir_for_images=charts_dir,
             landscape_mode=args.pdf_landscape,
+            stack_lines=args.stack_lines,
         )
 
     # HTML (optional)
@@ -1184,6 +1381,7 @@ def main(argv: Optional[List[str]] = None):
             hourly_counts=dict(hourly),
             total_entries=len(rows),
             time_range=time_range,
+            stack_lines=args.stack_lines,
         )
 
 if __name__ == "__main__":

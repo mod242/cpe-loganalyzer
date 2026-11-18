@@ -1,0 +1,8 @@
+IBM Content Platform Engine Version: 26.0.1.0, Build: content-engine-26.0.1-0-0 on cpe-test-2
+        VirtualServer: cpe-test-2, ServerInstance: cpe-test-2
+All times are local; the time zone is Coordinated Universal Time(UTC +00:00)
+Date (UTC +00:00)       Thread   Sub  Category     Sev   Message
+2026-03-03T07:00:00.000 0000001A ENG  FNRCE0000I - INFO  Server startup completed
+2026-03-03T07:30:00.000 00000080 API  FNRCE0000E - ERROR FNRCE0051E: E_OBJECT_NOT_FOUND: Requested item not found. Object identity: {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+2026-03-03T08:45:00.000 00000081 LDAP FNRCE0000W - WARN  LDAP search operation failed: [LDAP: error code 32 - No Such Object]
+2026-03-03T09:00:00.000 00000082 DB   FNRCE0000E - ERROR Database connection lost, code 1234567
