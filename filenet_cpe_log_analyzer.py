@@ -7,6 +7,8 @@ FileNet CPE Log Analyzer
 Features:
 - Optional: copy ONLY files matching a pattern from Kubernetes
   (kubectl exec + 'find . -print0 | tar --null -T - -czf -' → stream → local 'tar -xzf -').
+- Optional: copy ONLY files matching a pattern from a local Docker container
+  (docker exec + tar stream, or docker cp per file).
 - Recursive local scan of log directories by glob pattern.
 - Parse FileNet CPE / IBM Content Cortex (Liberty) log lines:
   "YYYY-MM-DDTHH:MM:SS.mmm <thread> <sub> <category> - LEVEL message".
@@ -39,6 +41,8 @@ import os
 import re
 import shlex
 import subprocess
+import tarfile
+import tempfile
 import textwrap
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta
@@ -493,6 +497,161 @@ def kube_sync_pattern_only(namespace: str,
         if single:
             break
 
+    return local_base
+
+
+# ---------- Docker utilities ----------
+
+DEFAULT_REMOTE_LOG_PATH = "/opt/ibm/wlp/usr/servers/defaultServer/FileNet"
+DEFAULT_REMOTE_FILE_PATTERN = "ce_system*.log"
+
+
+def _remote_find_cmd(remote_path: str, file_pattern: str) -> str:
+    return f"cd {sh_quote(remote_path)} && find . -type f -name {sh_quote(file_pattern)} -print0"
+
+
+def docker_find_files(container: str, remote_path: str, file_pattern: str) -> List[str]:
+    """List matching files (relative to remote_path) inside a running container."""
+    # 'sh -c' (not -lc): login profiles could write to stdout and corrupt the output.
+    res = _run(["docker", "exec", container, "sh", "-c", _remote_find_cmd(remote_path, file_pattern)])
+    files = []
+    for p in res.stdout.split("\x00"):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("./"):
+            p = p[2:]
+        files.append(p)
+    return files
+
+
+def _safe_member_path(dest: str, name: str) -> Optional[str]:
+    """Return the extraction target for a tar member, or None if it would escape dest."""
+    dest_abs = os.path.abspath(dest)
+    if os.path.isabs(name):
+        return None
+    target = os.path.abspath(os.path.join(dest_abs, name))
+    try:
+        if os.path.commonpath([dest_abs, target]) != dest_abs or target == dest_abs:
+            return None
+    except ValueError:  # different drives on Windows
+        return None
+    return target
+
+
+def extract_tar_stream(fileobj, dest: str) -> List[str]:
+    """
+    Extract regular files from a (gzipped) tar stream into dest.
+    Only regular files are written; absolute paths and '..' are rejected.
+    Returns the list of extracted relative paths.
+    """
+    os.makedirs(dest, exist_ok=True)
+    extracted = []
+    with tarfile.open(fileobj=fileobj, mode="r|*") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            target = _safe_member_path(dest, member.name)
+            if target is None:
+                print(f"[Docker] Skipping unsafe path in archive: {member.name!r}")
+                continue
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as out:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            extracted.append(os.path.relpath(target, os.path.abspath(dest)))
+    return extracted
+
+
+def docker_tar_stream(container: str, remote_path: str, file_pattern: str, local_base: str) -> List[str]:
+    """
+    Stream matching files out of the container as a gzipped tar and extract
+    them locally (no local 'tar' binary needed):
+      docker exec <container> sh -c 'cd <remote_path> && find . -type f -name <pattern> -print0 |
+                                     tar --null -T - -czf -'
+    """
+    remote_cmd = _remote_find_cmd(remote_path, file_pattern) + " | tar --null -T - -czf -"
+    cmd = ["docker", "exec", container, "sh", "-c", remote_cmd]
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
+        tar_error = None
+        extracted: List[str] = []
+        try:
+            extracted = extract_tar_stream(proc.stdout, local_base)
+        except tarfile.TarError as e:
+            tar_error = e
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+        rc = proc.wait()
+        err.seek(0)
+        stderr_text = err.read().decode("utf-8", "replace").strip()
+        if rc != 0:
+            raise SystemExit(f"[Docker] 'docker exec' failed (exit {rc}): {stderr_text}")
+        if tar_error is not None:
+            raise SystemExit(f"[Docker] Could not read tar stream from container {container!r}: "
+                             f"{tar_error} {stderr_text}".rstrip())
+    return extracted
+
+
+def docker_cp_files(container: str, remote_path: str, rel_files: List[str], local_base: str) -> List[str]:
+    """Copy files one by one with 'docker cp'."""
+    copied = []
+    for rel in rel_files:
+        target = _safe_member_path(local_base, rel)
+        if target is None:
+            print(f"[Docker] Skipping unsafe path: {rel!r}")
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        remote_full = remote_path.rstrip("/") + "/" + rel
+        try:
+            _run(["docker", "cp", f"{container}:{remote_full}", target])
+            copied.append(rel)
+        except subprocess.CalledProcessError as e:
+            print("[Docker] ERROR copying %s:%s -> %s\n%s\n%s" %
+                  (container, remote_full, target, e.stdout or "", e.stderr or ""))
+    return copied
+
+
+def docker_sync_pattern_only(container: str, remote_path: str, local_base: str,
+                             file_pattern: str, copy_mode: str = "tar") -> str:
+    """Copy ONLY files matching file_pattern from a local Docker container."""
+    print("[Docker] Container: %s" % container)
+    print("[Docker] Remote base dir: %s" % remote_path)
+    print("[Docker] Pattern to copy (only matches): %s" % file_pattern)
+    print("[Docker] Local base: %s" % local_base)
+    os.makedirs(local_base, exist_ok=True)
+
+    try:
+        state = _run(["docker", "inspect", "-f", "{{.State.Running}}", container])
+    except FileNotFoundError:
+        raise SystemExit("[Docker] 'docker' command not found in PATH.")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"[Docker] Container {container!r} not found: {(e.stderr or '').strip()}")
+    if state.stdout.strip() != "true":
+        raise SystemExit(f"[Docker] Container {container!r} is not running.")
+
+    if copy_mode == "tar":
+        files = docker_tar_stream(container, remote_path, file_pattern, local_base)
+    elif copy_mode == "cp":
+        try:
+            rel_files = docker_find_files(container, remote_path, file_pattern)
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(f"[Docker] Listing files failed:\n{e.stderr or ''}")
+        files = docker_cp_files(container, remote_path, rel_files, local_base)
+    else:
+        raise SystemExit(f"Unknown --docker-copy-mode: {copy_mode!r}")
+
+    if files:
+        print("[Docker] Copied %d file(s): %s" % (len(files), ", ".join(sorted(files))))
+    else:
+        print("[Docker] No matching files found in container %s." % container)
     return local_base
 
 
@@ -1168,7 +1327,9 @@ def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser(description="FileNet CPE Log Analyzer (pattern-only K8s copy + PDF report)")
     ap.add_argument("logdir",
                     help="Local directory for analysis (recursively scanned). "
-                         "With --kube-sync this is typically --kube-local-path.")
+                         "With --kube-sync this is typically --kube-local-path. "
+                         "With --docker-container the logs are copied into this directory "
+                         "(or --kube-local-path, if given).")
     ap.add_argument("--pattern", default="*.log",
                     help='Local glob pattern (default: "*.log")')
     ap.add_argument("--examples", type=int, default=3,
@@ -1201,6 +1362,16 @@ def main(argv: Optional[List[str]] = None):
     ap.add_argument("--kube-copy-mode", choices=["tar", "snapshot", "cp"], default="tar",
                     help="Copy mode: tar (default), snapshot, or cp")
 
+    # Docker options
+    ap.add_argument("--docker-container", default=None, metavar="NAME",
+                    help="Before analysis, copy ONLY pattern-matching files from this running local "
+                         "Docker container. Remote path: --kube-remote-path "
+                         f"(default: {DEFAULT_REMOTE_LOG_PATH}); file pattern: --kube-file-pattern "
+                         f'(default: "{DEFAULT_REMOTE_FILE_PATTERN}"); local target: --kube-local-path '
+                         "(default: logdir).")
+    ap.add_argument("--docker-copy-mode", choices=["tar", "cp"], default="tar",
+                    help="Docker copy mode: tar (default, docker exec + tar stream) or cp (docker cp per file)")
+
     # PDF options
     ap.add_argument("--pdf-report", default=None,
                     help="Path to output PDF report (e.g., ./results/report.pdf)")
@@ -1218,6 +1389,9 @@ def main(argv: Optional[List[str]] = None):
                     help="Title shown on the HTML report")
 
     args = ap.parse_args(argv)
+
+    if args.kube_sync and args.docker_container:
+        raise SystemExit("--kube-sync and --docker-container cannot be combined.")
 
     # Kubernetes sync
     if args.kube_sync:
@@ -1248,6 +1422,16 @@ def main(argv: Optional[List[str]] = None):
             flatten=args.kube_flatten,
         )
         analysis_dir = base
+    elif args.docker_container:
+        local_base = args.kube_local_path or args.logdir
+        print(f"[Docker] Copying files (mode: {args.docker_copy_mode}) …")
+        analysis_dir = docker_sync_pattern_only(
+            container=args.docker_container,
+            remote_path=args.kube_remote_path or DEFAULT_REMOTE_LOG_PATH,
+            local_base=local_base,
+            file_pattern=args.kube_file_pattern or DEFAULT_REMOTE_FILE_PATTERN,
+            copy_mode=args.docker_copy_mode,
+        )
     else:
         analysis_dir = args.logdir
 
