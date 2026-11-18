@@ -50,8 +50,6 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-./analyze
-./analyse_out
 # Translations
 *.mo
 *.pot
@@ -215,3 +213,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- cpe-loganalyzer: local data that must never be committed ----
+# Customer logs and analysis results
+/analyze/
+/analyse_out/
+/out.html
+/postgresql-*.log
+# Internal tool (kept outside this repo)
+/nedb/
+/nedb_log_analyzer.py
+# Typical local report output
+/results/
+
+# Synthetic test logs are part of the repo (overrides *.log above)
+!/tests/data/**/*.log
