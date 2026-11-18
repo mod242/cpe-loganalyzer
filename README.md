@@ -1,25 +1,58 @@
 # FileNet CPE Log Analyzer
 
-A **Kubernetes-aware log analysis tool** for IBM FileNet Content Platform Engine (CPE).
+A **Kubernetes- and Docker-aware log analysis tool** for IBM FileNet Content Platform Engine (CPE) and **IBM Content Cortex 26**.
 
-This utility helps you analyze CPE log files — either from **local directories** or directly from **OpenShift / Kubernetes** pods.  
-It automatically **collects**, **filters**, and **summarizes** log errors and warnings, then generates human-readable reports (Markdown, CSV, or PDF with charts).
+This utility helps you analyze CPE log files (`ce_system*.log`) — from **local directories**, directly from **OpenShift / Kubernetes** pods, or from a **local Docker container**.  
+It automatically **collects**, **filters**, and **summarizes** log errors and warnings, then generates human-readable reports (Markdown, CSV, PDF with charts, and HTML).
 
-It is designed for **containerized FileNet deployments** (e.g., Cloud Pak for Business Automation) and is especially useful for:
+It is designed for **containerized FileNet deployments** (e.g., Cloud Pak for Business Automation, IBM Content Cortex) and is especially useful for:
 - Migration & health-check scenarios
 - Offline analysis on developer notebooks
 - Environments with autoscaling or ephemeral pods
 
 ---
 
-## 📦 Pre-Installation
+## ✨ What's new in 1.1.0
 
-### 1. Python & dependencies
-Install Python (3.8+) and the required libraries:
+- **IBM Content Cortex 26 support** – verified against `ce_system*.log` files of a Content Cortex 26.0.1 (IF001) CPE container. The log line format is unchanged; the CPE file header is now recognized explicitly, and every run prints parse statistics (entries, header, continuation and unparsed lines) so format changes become visible.
+- **Multi-line entries** – stack traces and other continuation lines are attached to the preceding entry. The examples in Markdown, PDF and HTML show the first lines of the stack trace (`--stack-lines`, default 5); `raw_errors.csv` and `examples.csv` have a new last column `stacktrace`.
+- **Automatic FNRCE families** – in addition to the fixed rules, specific FileNet error codes (`FNRCEnnnnE` / `FNRCEnnnnW`) in the message or in the stack trace become their own family, e.g. `FNRCE0051E (E_OBJECT_NOT_FOUND)`.
+- **Docker as log source** – `--docker-container <name>` copies only the matching logs out of a running local container (e.g. the `cpe` container of a container-demo setup).
+- **pip-installable** – `pyproject.toml` with the command `cpe-loganalyzer`; Python 3.11+.
+- **Fixes** – `--until` now counts back from now (as documented); HTML and PDF reports escape log content; the fixed rules for `FNRCE0043E`/`FNRCE0066E` match the codes again.
+
+See [CHANGELOG.md](./CHANGELOG.md) for details.
+
+---
+
+## 📦 Installation
+
+### 1. Python & the analyzer
+Python **3.11 or newer** is required.
+
+Install as a command-line tool with pip (provides the `cpe-loganalyzer` command):
+
+```bash
+git clone https://github.com/mod242/cpe-loganalyzer.git
+cd cpe-loganalyzer
+pip install .
+cpe-loganalyzer --version
+```
+
+or directly from GitHub:
+
+```bash
+pip install git+https://github.com/mod242/cpe-loganalyzer.git
+```
+
+Running the script without installing it still works:
 
 ```bash
 pip install -r requirements.txt
+python filenet_cpe_log_analyzer.py --help
 ```
+
+`cpe-loganalyzer <args>` and `python filenet_cpe_log_analyzer.py <args>` are equivalent; the examples below use the script form.
 
 ### 2. Optional: Kubernetes CLI
 
@@ -29,6 +62,10 @@ If you want to collect logs directly from a running CPE pod, install and configu
 # Verify your cluster connection
 kubectl get pods -n filenet
 ```
+
+### 3. Optional: Docker CLI
+
+To collect logs from a local container (`--docker-container`), the `docker` command must be available and the container must be running. The container needs `sh`, `find` and `tar` (the IBM CPE images include them).
 
 ---
 
@@ -106,6 +143,51 @@ python filenet_cpe_log_analyzer.py /home/user/analyze \
 3. Analyzes the downloaded files
 4. Produces Markdown, CSV, PDF, and HTML reports
 
+---
+
+## 🐳 Docker Integration (e.g. IBM Content Cortex 26 container-demo)
+
+If CPE runs as a local Docker container — for example the `cpe` container of a container-demo / `cpit.sh` setup with IBM Content Cortex 26 — the script copies **only** the matching log files out of the container and analyzes them:
+
+```bash
+python filenet_cpe_log_analyzer.py ./cpe-logs \
+  --docker-container cpe \
+  --pattern "ce_system*.log" \
+  --since "24h" \
+  --outdir ./results \
+  --pdf-report ./results/cpe_report.pdf \
+  --html-report ./results/cpe_report.html \
+  --pdf-title "Content Cortex 26 – CPE Logs (Last 24h)" \
+  --html-title "Content Cortex 26 – CPE Logs (Last 24h)" \
+  --pdf-landscape
+```
+
+### What happens:
+1. Checks that container `cpe` is running (`docker inspect`)
+2. Executes inside the container (default mode `--docker-copy-mode tar`):
+   ```bash
+   cd /opt/ibm/wlp/usr/servers/defaultServer/FileNet && \
+   find . -type f -name "ce_system*.log" -print0 | tar --null -T - -czf -
+   ```
+   and extracts the stream locally into `./cpe-logs` (keeping the `<server-name>/ce_system0.log` sub folders; no local `tar` needed)
+3. Analyzes the copied files and writes the reports
+
+Defaults and overrides:
+
+| Setting | Default | Override |
+|---------|---------|----------|
+| Path inside the container | `/opt/ibm/wlp/usr/servers/defaultServer/FileNet` | `--kube-remote-path` |
+| Files to copy | `ce_system*.log` | `--kube-file-pattern` |
+| Local target directory | `logdir` argument | `--kube-local-path` |
+| Copy method | `tar` (docker exec + tar stream) | `--docker-copy-mode cp` (docker cp per file) |
+
+> **Tip (container-demo):** the CPE `FileNet` directory is also mounted on the host (`~/cpit_data/cpe_data/FileNet`). Instead of copying from the container you can analyze it in place:
+> `python filenet_cpe_log_analyzer.py ~/cpit_data/cpe_data/FileNet --pattern "ce_system*.log" --outdir ./results`
+
+> **Time zone:** CPE writes timestamps in the container's time zone (UTC in the IBM images, see the log header). `--since`/`--until` are compared with the local time of the machine running the analyzer, so on a host in another time zone the window is shifted by the offset.
+
+---
+
 ### Quick HTML Export Examples
 
 ```bash
@@ -137,19 +219,19 @@ The generated PDF includes:
 - **Top error families** (wrapped labels)
 - **Error count per day/hour**
 - **Consolidated error table**
-- **Example log messages per family**
+- **Example log messages per family** (with the first lines of the stack trace)
 
 **Charts included:**
 - Top error families (horizontal bar chart)
 - Errors per day
 - Errors per hour
 
-### **NEW:** Interactive HTML Report
+### Interactive HTML Report
 The HTML report provides a modern, interactive web-based view with:
 
 - **📈 Interactive Charts**: Bar charts and line graphs using Chart.js
 - **📊 Statistics Dashboard**: Key metrics displayed in attractive cards
-- **🔍 Expandable Error Details**: Click "Show Examples" to view actual log entries
+- **🔍 Expandable Error Details**: Click "Show Examples" to view actual log entries including a stack trace excerpt
 - **📱 Responsive Design**: Works on desktop, tablet, and mobile
 - **🎨 Professional Styling**: Modern UI with gradients and shadows
 - **⚡ Fast Loading**: Self-contained HTML with embedded CSS and JavaScript
@@ -178,9 +260,19 @@ The HTML report provides a modern, interactive web-based view with:
 |--------|--------------|
 | `--pattern` | File glob pattern (default: `*.log`) |
 | `--since` | Relative start (e.g., `24h`, `2d6h`) |
-| `--until` | Relative end (default: `0h` = now) |
+| `--until` | Relative end, counted back from now (default: `0h` = now; `2h` = two hours ago) |
 | `--outdir` | Directory for reports and CSVs |
 | `--examples` | Example rows per family (default: 3) |
+| `--stack-lines` | Stack trace lines shown per example and in the CSV `stacktrace` column (default: 5, `0` = none) |
+| `--version` | Print the version and exit |
+
+### Error families
+
+Each WARN/ERROR entry is assigned to a family in this order:
+
+1. Fixed rules on the first line of the entry (e.g. `WSIAuthenticatorImpl login exception`, `checkNameCollision / FNRCE0043E`, `getContent failures`).
+2. The first specific FileNet code `FNRCEnnnnE`/`FNRCEnnnnW` in the message, otherwise in the stack trace. The family is named after the code, plus the symbolic name if it follows the code: `FNRCE0051E (E_OBJECT_NOT_FOUND)`. The generic category code `FNRCE0000x` of the log column is ignored.
+3. Otherwise the message text with GUIDs, IDs and long numbers masked.
 
 ### PDF options
 
@@ -213,6 +305,15 @@ The HTML report provides a modern, interactive web-based view with:
 | `--kube-flatten` | Do not create per-pod subfolders |
 | `--kube-copy-mode` | One of: `tar` (default, robust), `snapshot`, `cp` |
 
+### Docker options
+
+| Option | Description |
+|--------|--------------|
+| `--docker-container` | Copy logs from this running local container before analysis (cannot be combined with `--kube-sync`) |
+| `--docker-copy-mode` | `tar` (default, docker exec + tar stream) or `cp` (docker cp per file) |
+
+`--kube-remote-path`, `--kube-file-pattern` and `--kube-local-path` also apply to `--docker-container` (see defaults above).
+
 ---
 
 ## 🧾 Output Overview
@@ -221,23 +322,34 @@ The HTML report provides a modern, interactive web-based view with:
 |------|--------------|
 | `summary_markdown.md` | Markdown summary report |
 | `summary.csv` | Summary of error families and counts |
-| `examples.csv` | Example log entries per family |
-| `raw_errors.csv` | All WARN/ERROR lines |
+| `examples.csv` | Example log entries per family (last column `stacktrace`) |
+| `raw_errors.csv` | All WARN/ERROR entries (last column `stacktrace`) |
 | `timeseries_overall_daily.csv` | Error count per day |
 | `timeseries_overall_hourly.csv` | Error count per hour |
 | `timeseries_family_daily.csv` | Error count per day per family |
 | `timeseries_family_hourly.csv` | Error count per hour per family |
 | `filenet_cpe_report.pdf` | Visual PDF report with charts |
-| `report.html` | **NEW:** Interactive HTML report with embedded charts |
+| `report.html` | Interactive HTML report with embedded charts |
 
 ---
 
 ## 🧪 Tested Environments
 
 - IBM FileNet CPE 5.5.8 / 5.7 (Liberty)
+- IBM Content Cortex 26.0.1 (IF001) CPE container (Docker)
 - IBM Cloud Pak for Business Automation 24.0.x
 - OpenShift 4.x / Kubernetes 1.27+
-- Ubuntu 22.04, macOS 13+, Windows 11 (Python 3.10+)
+- Ubuntu 22.04, macOS 13+, Windows 11
+- Python 3.11 – 3.14 (CI runs the test suite on 3.11 and 3.14)
+
+### Running the tests
+
+```bash
+pip install ".[test]"
+pytest
+```
+
+The tests use small synthetic logs in `tests/data/` (Content Cortex 26 line format, no real host names, users or IDs).
 
 ---
 
@@ -309,87 +421,3 @@ It’s ideal for:
 - Quickly summarizing the most common error families
 
 Inspired by real-world FileNet CPE scaling and migration projects.
-
----
-
-## 🚀 New Advanced Features
-
-The project now includes several enhanced versions with advanced capabilities:
-
-### Advanced FileNet CPE Log Analyzer (`advanced_filenet_cpe_log_analyzer.py`)
-
-**New Features:**
-- **Configuration Management**: JSON-based configuration files with environment variable support
-- **Performance Monitoring**: Real-time memory usage and processing speed tracking
-- **Enhanced Error Handling**: Automatic encoding detection and graceful error recovery
-- **HTML Reports**: Rich HTML reports with interactive visualizations
-- **Plugin Architecture**: Extensible design for custom normalizers and processors
-- **Advanced Filtering**: More sophisticated filtering and search capabilities
-
-**Configuration System (`config.py`):**
-- Centralized configuration management with validation
-- Environment variable support for CI/CD pipelines
-- Sample configuration generation and validation utilities
-- Support for custom analysis parameters and output formats
-
-### Usage Examples
-
-**Create and use configuration file:**
-```bash
-# Create a sample configuration file
-python config.py --create-sample ./my_config.json
-
-# Use custom configuration
-python advanced_filenet_cpe_log_analyzer.py /path/to/logs --config ./my_config.json
-
-# Validate configuration
-python config.py --validate ./my_config.json
-```
-
-**Environment variables:**
-```bash
-export LOGANALYZER_FILE_PATTERN="*.log"
-export LOGANALYZER_OUTPUT_FORMAT="html"
-export LOGANALYZER_MAX_EXAMPLES="5"
-python advanced_filenet_cpe_log_analyzer.py /path/to/logs
-```
-
-**Performance monitoring:**
-```bash
-python advanced_filenet_cpe_log_analyzer.py /path/to/logs --monitor-performance --verbose
-```
-
-### Configuration Options
-
-The new configuration system supports:
-
-```json
-{
-  "file_pattern": "*.log",
-  "max_file_size_mb": 1000,
-  "encoding": "utf-8",
-  "max_examples": 3,
-  "severity_levels": ["ERROR", "WARN", "WARNING", "FATAL", "SEVERE"],
-  "normalize_messages": true,
-  "max_pattern_length": 200,
-  "progress_interval": 1000,
-  "batch_size": 10000,
-  "enable_parallel_processing": false,
-  "output_format": "both",
-  "chart_dpi": 300,
-  "chart_width": 14,
-  "chart_height": 8,
-  "default_time_window": "24h",
-  "timezone": "UTC"
-}
-```
-
-### New Output Formats
-
-- **HTML Reports**: Interactive HTML reports with embedded charts and filtering
-- **Enhanced JSON**: Structured JSON with performance metrics and metadata
-- **Excel Support**: Export to Excel format (when pandas is available)
-- **Performance Logs**: Detailed performance and memory usage tracking
-
----
-
