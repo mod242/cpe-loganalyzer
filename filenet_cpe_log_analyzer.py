@@ -29,6 +29,7 @@ Outputs:
 import argparse
 import csv
 import glob
+import html
 import json
 import os
 import re
@@ -37,7 +38,7 @@ import subprocess
 import textwrap
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Matplotlib for charts (headless)
 import matplotlib
@@ -60,20 +61,25 @@ def normalize_message(msg: str) -> str:
     m = re.sub(r"\b\d{6,}\b", "{NUM}", m)
     m = re.sub(r"\s+", " ", m).strip()
 
-    if "[WSIAuthenticatorImpl] login exception" in m or "WSIAuthenticatorImpl" in m:
+    def has(needle: str) -> bool:
+        # Check the normalized text (as in 1.0) and the original text, because
+        # the {ID} masking above also replaces FNRCE codes such as FNRCE0043E.
+        return needle in m or needle in msg
+
+    if has("[WSIAuthenticatorImpl] login exception") or has("WSIAuthenticatorImpl"):
         return "WSIAuthenticatorImpl login exception (authentication failures)"
-    if "MethodName: checkNameCollision" in m or "E_NOT_UNIQUE" in m or "FNRCE0043E" in m:
+    if has("MethodName: checkNameCollision") or has("E_NOT_UNIQUE") or has("FNRCE0043E"):
         return "checkNameCollision / FNRCE0043E (E_NOT_UNIQUE) – Name already exists"
-    if "MethodName: getContent" in m:
+    if has("MethodName: getContent"):
         return "getContent failures (content retrieval)"
-    if "FNRCE0066E" in m or "E_UNEXPECTED_EXCEPTION" in m:
+    if has("FNRCE0066E") or has("E_UNEXPECTED_EXCEPTION"):
         return "FNRCE0066E (E_UNEXPECTED_EXCEPTION) – unexpected error"
-    if "TTLStreamReaper" in m:
+    if has("TTLStreamReaper"):
         return "TTLStreamReaper scheduling issue"
     return (m[:140] + "…") if len(m) > 140 else m
 
 
-def parse_relative_delta(expr: str):
+def parse_relative_delta(expr: Optional[str]):
     """
     Supports: "24h", "2d", "3h30m", "90m", "1w", "1w2d", "48h15m10s", "0h", "now"
     Units: w (weeks), d (days), h (hours), m (minutes), s (seconds)
@@ -489,7 +495,7 @@ def generate_pdf_report(
     body = styles["BodyText"]; body.fontSize = 9
     data = [["Count", "Error Family"]]
     for s in summary:
-        fam_para = RLParagraph(s["family"], body)
+        fam_para = RLParagraph(html.escape(s["family"], quote=False), body)
         data.append([s["count"], fam_para])
     count_col = 80
     fam_col = max(200, avail_w - count_col)
@@ -532,12 +538,13 @@ def generate_pdf_report(
             examples = fam_to_examples.get(fam, [])[:2]
             if not examples:
                 continue
-            elements.append(Paragraph(fam, styles["Heading3"]))
+            elements.append(Paragraph(html.escape(fam, quote=False), styles["Heading3"]))
             for ex in examples:
                 msg = ex["message"]
                 if len(msg) > 600:
                     msg = msg[:600] + "…"
-                elements.append(Paragraph(f"<b>{ex['timestamp']}</b> — {msg}", styles["BodyText"]))
+                elements.append(Paragraph(f"<b>{html.escape(ex['timestamp'])}</b> — "
+                                          f"{html.escape(msg, quote=False)}", styles["BodyText"]))
             elements.append(Spacer(1, 10))
 
     doc.build(elements)
@@ -560,31 +567,36 @@ def generate_html_report(
     Generate an HTML report with embedded charts and interactive features.
     """
     os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
-    
+    esc = html.escape
+
+    def js(value) -> str:
+        # JSON literal that is safe inside a <script> block.
+        return json.dumps(value).replace("</", "<\\/")
+
     # Calculate statistics
     total_families = len(summary)
     top_error = summary[0] if summary else {"family": "None", "count": 0}
-    
+
     # Group examples by family for easy lookup
     examples_by_family = defaultdict(list)
     for ex in example_rows:
         examples_by_family[ex["family"]].append(ex)
-    
+
     # Prepare data for charts (JavaScript arrays)
-    chart_labels = [f'"{s["family"][:50]}..."' if len(s["family"]) > 50 else f'"{s["family"]}"' for s in summary[:10]]
+    chart_labels = [s["family"][:50] + "..." if len(s["family"]) > 50 else s["family"] for s in summary[:10]]
     chart_counts = [s["count"] for s in summary[:10]]
-    
+
     # Time series data
     daily_labels = sorted(daily_counts.keys())
     daily_values = [daily_counts[d] for d in daily_labels]
-    
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{project_title}</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>{esc(project_title)}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -753,9 +765,9 @@ def generate_html_report(
 <body>
     <div class="container">
         <div class="header">
-            <h1>{project_title}</h1>
+            <h1>{esc(project_title)}</h1>
             <div class="subtitle">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
-            <div class="subtitle">Time Range: {time_range}</div>
+            <div class="subtitle">Time Range: {esc(time_range)}</div>
         </div>
 
         <div class="stats-grid">
@@ -810,7 +822,7 @@ def generate_html_report(
         html_content += f"""
                 <tr>
                     <td><span class="count-badge">{family_data["count"]}</span></td>
-                    <td><div class="error-family">{family_data["family"]}</div></td>
+                    <td><div class="error-family">{esc(family_data["family"])}</div></td>
                     <td>
                         {"<button class='toggle-btn' onclick='toggleExamples(" + str(i) + ")'>Show Examples</button>" if has_examples else "No examples"}
                     </td>
@@ -826,8 +838,8 @@ def generate_html_report(
             for ex in family_examples[:3]:  # Show up to 3 examples
                 html_content += f"""
                             <div class="example-details" style="margin: 10px 0;">
-                                <div><span class="timestamp">{ex["timestamp"]}</span> | {ex["source_file"]}</div>
-                                <div style="margin-top: 5px;">{ex["message"][:200]}{"..." if len(ex["message"]) > 200 else ""}</div>
+                                <div><span class="timestamp">{esc(ex["timestamp"])}</span> | {esc(ex["source_file"])}</div>
+                                <div style="margin-top: 5px;">{esc(ex["message"][:200])}{"..." if len(ex["message"]) > 200 else ""}</div>
                             </div>"""
             
             html_content += """
@@ -851,10 +863,10 @@ def generate_html_report(
         new Chart(ctx1, {{
             type: 'bar',
             data: {{
-                labels: [{", ".join(chart_labels)}],
+                labels: {js(chart_labels)},
                 datasets: [{{
                     label: 'Error Count',
-                    data: [{", ".join(map(str, chart_counts))}],
+                    data: {js(chart_counts)},
                     backgroundColor: 'rgba(231, 76, 60, 0.7)',
                     borderColor: 'rgba(231, 76, 60, 1)',
                     borderWidth: 1
@@ -890,10 +902,10 @@ def generate_html_report(
         new Chart(ctx2, {{
             type: 'line',
             data: {{
-                labels: [{", ".join(f'"{d}"' for d in daily_labels)}],
+                labels: {js(daily_labels)},
                 datasets: [{{
                     label: 'Daily Errors',
-                    data: [{", ".join(map(str, daily_values))}],
+                    data: {js(daily_values)},
                     borderColor: 'rgba(52, 152, 219, 1)',
                     backgroundColor: 'rgba(52, 152, 219, 0.1)',
                     tension: 0.4,
@@ -944,7 +956,24 @@ def generate_html_report(
 
 # ---------- Main ----------
 
-def main():
+def compute_time_window(since: Optional[str], until: Optional[str], now: Optional[datetime] = None):
+    """
+    Translate relative --since/--until expressions into absolute datetimes.
+    Both are measured back from `now`: --since 24h --until 2h means
+    [now - 24h, now - 2h]. Returns (since_dt or None, until_dt).
+    """
+    now = now or datetime.now()
+    until_dt = now - (parse_relative_delta(until) or timedelta(0))
+    since_dt = None
+    since_delta = parse_relative_delta(since) if since else None
+    if since_delta is not None:
+        since_dt = now - since_delta
+    if since_dt and since_dt > until_dt:
+        raise SystemExit(f"Invalid time window: since ({since_dt}) > until ({until_dt})")
+    return since_dt, until_dt
+
+
+def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser(description="FileNet CPE Log Analyzer (pattern-only K8s copy + PDF report)")
     ap.add_argument("logdir",
                     help="Local directory for analysis (recursively scanned). "
@@ -958,7 +987,7 @@ def main():
     ap.add_argument("--since", default=None,
                     help='Relative start, e.g. "24h", "2d", "3h30m"')
     ap.add_argument("--until", default="0h",
-                    help='Relative end from now, e.g. "0h" (now)')
+                    help='Relative end, measured back from now, e.g. "0h" (now), "2h" (two hours ago)')
 
     # Kubernetes options
     ap.add_argument("--kube-sync", action="store_true",
@@ -994,7 +1023,7 @@ def main():
     ap.add_argument("--html-title", default="FileNet CPE Log Analyzer – Report",
                     help="Title shown on the HTML report")
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     # Kubernetes sync
     if args.kube_sync:
@@ -1030,13 +1059,7 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    now = datetime.now()
-    until_dt = now + (parse_relative_delta(args.until) or timedelta(0))
-    since_dt = None
-    if args.since:
-        since_dt = now - parse_relative_delta(args.since)
-    if since_dt and since_dt > until_dt:
-        raise SystemExit(f"Invalid time window: since ({since_dt}) > until ({until_dt})")
+    since_dt, until_dt = compute_time_window(args.since, args.until)
 
     # Analysis
     rows = parse_logs(analysis_dir, args.pattern, since_dt, until_dt)
