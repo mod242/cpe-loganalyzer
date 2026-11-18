@@ -92,3 +92,9 @@ def test_pdf_output(run_cli, tmp_path):
     assert pdf_path.read_bytes().startswith(b"%PDF")
     assert (outdir / "_charts" / "chart_top_families.png").exists()
 
+
+def test_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        la.main(["--version"])
+    assert exc.value.code == 0
+    assert la.__version__ in capsys.readouterr().out

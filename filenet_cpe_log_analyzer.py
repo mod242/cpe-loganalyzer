@@ -32,6 +32,8 @@ Outputs:
   (optional) HTML report
 """
 
+__version__ = "1.1.0"
+
 import argparse
 import csv
 import glob
@@ -1324,7 +1326,11 @@ def _md_cell(text: str) -> str:
 
 
 def main(argv: Optional[List[str]] = None):
-    ap = argparse.ArgumentParser(description="FileNet CPE Log Analyzer (pattern-only K8s copy + PDF report)")
+    ap = argparse.ArgumentParser(
+        prog="cpe-loganalyzer",
+        description="FileNet CPE / IBM Content Cortex Log Analyzer "
+                    "(local, Kubernetes or Docker source; Markdown/CSV/PDF/HTML reports)")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("logdir",
                     help="Local directory for analysis (recursively scanned). "
                          "With --kube-sync this is typically --kube-local-path. "

@@ -1,3 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpe-loganalyzer"
+dynamic = ["version"]
+description = "Log analyzer for IBM FileNet Content Platform Engine / IBM Content Cortex (ce_system*.log) with Markdown, CSV, PDF and HTML reports"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "reportlab>=4.0",
+]
+keywords = ["filenet", "content-platform-engine", "content-cortex", "logs", "kubernetes", "docker"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: System :: Logging",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+cpe-loganalyzer = "filenet_cpe_log_analyzer:main"
+
+[project.urls]
+Homepage = "https://github.com/mod242/cpe-loganalyzer"
+
+[tool.setuptools]
+py-modules = ["filenet_cpe_log_analyzer"]
+
+[tool.setuptools.dynamic]
+version = { attr = "filenet_cpe_log_analyzer.__version__" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
