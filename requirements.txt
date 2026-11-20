@@ -2,3 +2,5 @@
 # Transitive dependencies (numpy, pillow, ...) are resolved by pip.
 matplotlib==3.11.2
 reportlab==5.1.0
+# Optional, only for YAML rule files (--rules rules.yaml):
+# PyYAML==6.0.3

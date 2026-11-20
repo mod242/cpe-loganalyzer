@@ -260,24 +260,129 @@ def mask_message(msg: str):
     return template, tuple(values)
 
 
+# ---------- Custom rules (--rules) ----------
+
+class FamilyRule:
+    """A user-defined rule: regex on the first line of an entry -> family name."""
+
+    def __init__(self, pattern: str, family: str, ignore_case: bool = False, source: str = ""):
+        flags = re.IGNORECASE if ignore_case else 0
+        self.pattern = pattern
+        self.family = family
+        self.regex = re.compile(pattern, flags)
+        self.source = source
+        # Group references such as \1 or \g<name> are expanded with the match.
+        self.expand = "\\" in family
+        if self.expand:
+            for ref in re.findall(r"\\(\d+)|\\g<(\w+)>", family):
+                num, name = ref
+                if num and int(num) > self.regex.groups:
+                    raise ValueError(f"family {family!r} references group {num}, "
+                                     f"but the pattern has {self.regex.groups} group(s)")
+                if name and not name.isdigit() and name not in self.regex.groupindex:
+                    raise ValueError(f"family {family!r} references unknown group {name!r}")
+
+    def apply(self, msg: str) -> Optional[str]:
+        m = self.regex.search(msg)
+        if not m:
+            return None
+        if not self.expand:
+            return self.family
+        try:
+            return m.expand(self.family)
+        except (re.error, IndexError):
+            return self.family
+
+    def __repr__(self):
+        return f"FamilyRule({self.pattern!r} -> {self.family!r})"
+
+
+def load_rules(path: str) -> List[FamilyRule]:
+    """
+    Load custom family rules from a JSON or YAML file.
+
+    Accepted structure (JSON shown; YAML is equivalent):
+      {"rules": [{"pattern": "<regex>", "family": "<name>", "ignore_case": false}, ...]}
+    or just the list. .yaml/.yml files need PyYAML; other files are read as JSON.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise SystemExit(f"[Rules] Cannot read {path!r}: {e}")
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".yaml", ".yml"):
+        try:
+            import yaml  # optional dependency
+        except ImportError:
+            raise SystemExit(f"[Rules] {path!r} is a YAML file, but PyYAML is not installed. "
+                             "Install it with: pip install 'cpe-loganalyzer[yaml]' (or pip install PyYAML), "
+                             "or use a JSON rules file.")
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            raise SystemExit(f"[Rules] Invalid YAML in {path!r}: {e}")
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"[Rules] Invalid JSON in {path!r}: {e}")
+
+    if isinstance(data, dict):
+        data = data.get("rules")
+    if not isinstance(data, list):
+        raise SystemExit(f"[Rules] {path!r}: expected a list of rules or an object with a 'rules' list.")
+
+    rules: List[FamilyRule] = []
+    for i, item in enumerate(data, start=1):
+        where = f"[Rules] {path!r}, rule {i}"
+        if not isinstance(item, dict):
+            raise SystemExit(f"{where}: expected an object with 'pattern' and 'family'.")
+        pattern, family = item.get("pattern"), item.get("family")
+        if not isinstance(pattern, str) or not pattern:
+            raise SystemExit(f"{where}: 'pattern' (non-empty string) is missing.")
+        if not isinstance(family, str) or not family.strip():
+            raise SystemExit(f"{where}: 'family' (non-empty string) is missing.")
+        unknown = set(item) - {"pattern", "family", "ignore_case", "comment"}
+        if unknown:
+            raise SystemExit(f"{where}: unknown key(s): {', '.join(sorted(unknown))}.")
+        try:
+            rules.append(FamilyRule(pattern, family.strip(), bool(item.get("ignore_case", False)),
+                                    source=f"{os.path.basename(path)}#{i}"))
+        except re.error as e:
+            raise SystemExit(f"{where}: invalid regular expression {pattern!r}: {e}")
+        except ValueError as e:
+            raise SystemExit(f"{where}: {e}")
+    return rules
+
+
 # ---------- Family assignment ----------
 
 # Kinds of family assignment (summary field "kind").
+KIND_CUSTOM = "custom-rule"
 KIND_BUILTIN = "builtin-rule"
 KIND_FNRCE = "fnrce-code"
 KIND_MASKED = "masked-message"
 
 
-def classify_message(msg: str, continuation: Optional[List[str]] = None):
+def classify_message(msg: str, continuation: Optional[List[str]] = None,
+                     rules: Optional[List[FamilyRule]] = None):
     """
     Assign an entry to a family. Returns (family, kind).
 
     Order:
+      0. Custom rules (--rules), first match wins.
       1. Fixed rules on the first line of the entry (unchanged from 1.0).
       2. Specific FNRCE error code (FNRCEnnnnE/W) in the message, then in the
          continuation lines (stack trace) -> family named after the code.
       3. Fallback: the message text with variable parts masked (mask_message).
     """
+    for rule in rules or ():
+        fam = rule.apply(msg)
+        if fam:
+            return fam, KIND_CUSTOM
+
     m = mask_message(msg)[0]
 
     def has(needle: str) -> bool:
@@ -303,9 +408,10 @@ def classify_message(msg: str, continuation: Optional[List[str]] = None):
     return ((m[:MAX_FAMILY_LEN] + "…") if len(m) > MAX_FAMILY_LEN else m), KIND_MASKED
 
 
-def normalize_message(msg: str, continuation: Optional[List[str]] = None) -> str:
+def normalize_message(msg: str, continuation: Optional[List[str]] = None,
+                      rules: Optional[List[FamilyRule]] = None) -> str:
     """Family name of an entry (see classify_message)."""
-    return classify_message(msg, continuation)[0]
+    return classify_message(msg, continuation, rules)[0]
 
 
 # ---------- Per-family statistics ----------
@@ -1681,7 +1787,17 @@ def main(argv: Optional[List[str]] = None):
     ap.add_argument("--html-title", default="FileNet CPE Log Analyzer – Report",
                     help="Title shown on the HTML report")
 
+    # Grouping
+    ap.add_argument("--rules", default=None, metavar="FILE",
+                    help="Custom family rules (JSON, or YAML with PyYAML installed): a list of "
+                         "{pattern: <regex>, family: <name>}. They are checked before the built-in rules.")
+
     args = ap.parse_args(argv)
+
+    rules: List[FamilyRule] = []
+    if args.rules:
+        rules = load_rules(args.rules)
+        print(f"[Rules] {len(rules)} custom rule(s) loaded from {args.rules}")
 
     if args.kube_sync and args.docker_container:
         raise SystemExit("--kube-sync and --docker-container cannot be combined.")
@@ -1743,12 +1859,13 @@ def main(argv: Optional[List[str]] = None):
     families: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     kinds: Dict[str, str] = {}
     for r in rows:
-        fam, kind = classify_message(r["message"], r.get("continuation"))
+        fam, kind = classify_message(r["message"], r.get("continuation"), rules)
         families[fam].append(r)
         kinds.setdefault(fam, kind)
 
     summary = summarize_families(families, kinds)
-    print(f"[Families] {len(summary)} families for {len(rows)} entries")
+    print(f"[Families] {len(summary)} families for {len(rows)} entries "
+          f"({sum(1 for k in kinds.values() if k == KIND_CUSTOM)} from custom rules)")
     write_csv(os.path.join(args.outdir, "summary.csv"), summary_rows_for_csv(summary), SUMMARY_CSV_FIELDS)
 
     example_rows = build_example_rows(families, args.examples, args.stack_lines)

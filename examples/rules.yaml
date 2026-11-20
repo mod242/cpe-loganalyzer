@@ -1,0 +1,26 @@
+# Custom family rules for cpe-loganalyzer (--rules examples/rules.yaml)
+#
+# Each rule: a regular expression ("pattern", Python syntax, searched in the
+# first line of a WARN/ERROR entry) and the family name to use on a match.
+# Rules are checked top to bottom before the built-in rules; the first match wins.
+# The family name may reference groups of the pattern: \1, \2, ... or \g<name>.
+# Optional: ignore_case: true, comment: "...".
+#
+# YAML needs PyYAML (pip install 'cpe-loganalyzer[yaml]'); the same rules as
+# JSON are in rules.json and work without extra packages.
+# Use single quotes in YAML so that backslashes are kept as they are.
+
+rules:
+  # MCHE warning written while object store caches are (re)built, e.g. on startup.
+  - pattern: 'buildNewObjectStoreCache: cache reloaded in transaction'
+    family: 'ObjectStoreCache reloaded in transaction (MCHE)'
+
+  # Active Directory bind failures: the "data" sub code tells the reason
+  # (52e invalid credentials, 525 user not found, 775 account locked, ...).
+  # Keep this rule above the generic LDAP rule.
+  - pattern: 'LDAP: error code 49 .*AcceptSecurityContext error, data (\w+)'
+    family: 'LDAP error code 49 (AD bind failed, data \1)'
+
+  # All other LDAP errors, one family per LDAP result code ("error code nn").
+  - pattern: 'LDAP: error code (\d+)'
+    family: 'LDAP error code \1'

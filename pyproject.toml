@@ -24,7 +24,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+# YAML rule files for --rules (JSON rule files need no extra package)
+yaml = ["PyYAML>=6"]
+test = ["pytest>=8", "PyYAML>=6"]
 
 [project.scripts]
 cpe-loganalyzer = "filenet_cpe_log_analyzer:main"

@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "comment": "MCHE warning written while object store caches are (re)built, e.g. on startup.",
+      "pattern": "buildNewObjectStoreCache: cache reloaded in transaction",
+      "family": "ObjectStoreCache reloaded in transaction (MCHE)"
+    },
+    {
+      "comment": "Active Directory bind failures; the data sub code tells the reason (52e invalid credentials, 525 user not found, 775 account locked). Keep above the generic LDAP rule.",
+      "pattern": "LDAP: error code 49 .*AcceptSecurityContext error, data (\\w+)",
+      "family": "LDAP error code 49 (AD bind failed, data \\1)"
+    },
+    {
+      "comment": "All other LDAP errors, one family per LDAP result code (error code nn).",
+      "pattern": "LDAP: error code (\\d+)",
+      "family": "LDAP error code \\1"
+    }
+  ]
+}
