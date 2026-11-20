@@ -359,7 +359,7 @@ def load_rules(path: str) -> List[FamilyRule]:
 
 # ---------- Family assignment ----------
 
-# Kinds of family assignment (summary field "kind").
+# Kinds of family assignment (reported in the JSON output).
 KIND_CUSTOM = "custom-rule"
 KIND_BUILTIN = "builtin-rule"
 KIND_FNRCE = "fnrce-code"
@@ -1718,6 +1718,50 @@ def summary_rows_for_csv(summary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for s in summary]
 
 
+JSON_SCHEMA_VERSION = 1
+
+
+def build_json_report(summary: List[Dict[str, Any]], rows: List[Dict[str, Any]],
+                      stats: Dict[str, int], since_dt, until_dt,
+                      pattern: str, rules_file: Optional[str]) -> Dict[str, Any]:
+    """Machine-readable summary for monitoring/CI (written by --json)."""
+    levels = Counter(r.get("level", "") for r in rows)
+    return {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "tool": "cpe-loganalyzer",
+        "version": __version__,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "time_window": {
+            "since": since_dt.isoformat(timespec="seconds") if since_dt else None,
+            "until": until_dt.isoformat(timespec="seconds") if until_dt else None,
+        },
+        "pattern": pattern,
+        "rules_file": rules_file,
+        "parse_stats": dict(stats),
+        "totals": {
+            "entries": len(rows),
+            "families": len(summary),
+            "levels": dict(sorted(levels.items())),
+            "first_seen": min((r["timestamp"] for r in rows), default=None),
+            "last_seen": max((r["timestamp"] for r in rows), default=None),
+        },
+        "families": [
+            {
+                "family": s["family"],
+                "count": s["count"],
+                "level": s["level"],
+                "levels": s["levels"],
+                "first_seen": s["first_seen"],
+                "last_seen": s["last_seen"],
+                "variants": s["variants"],
+                "sample_values": s["sample_values"],
+                "kind": s["kind"],
+            }
+            for s in summary
+        ],
+    }
+
+
 def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser(
         prog="cpe-loganalyzer",
@@ -1787,10 +1831,13 @@ def main(argv: Optional[List[str]] = None):
     ap.add_argument("--html-title", default="FileNet CPE Log Analyzer – Report",
                     help="Title shown on the HTML report")
 
-    # Grouping
+    # Grouping / machine-readable output
     ap.add_argument("--rules", default=None, metavar="FILE",
                     help="Custom family rules (JSON, or YAML with PyYAML installed): a list of "
                          "{pattern: <regex>, family: <name>}. They are checked before the built-in rules.")
+    ap.add_argument("--json", default=None, metavar="FILE", dest="json_report",
+                    help="Write a machine-readable JSON summary (families with count, level, "
+                         "first/last seen, variants) to FILE")
 
     args = ap.parse_args(argv)
 
@@ -1983,6 +2030,14 @@ def main(argv: Optional[List[str]] = None):
             stack_lines=args.stack_lines,
         )
 
+    # JSON (optional)
+    if args.json_report:
+        report = build_json_report(summary, rows, stats, since_dt, until_dt, args.pattern, args.rules)
+        os.makedirs(os.path.dirname(args.json_report) or ".", exist_ok=True)
+        with open(args.json_report, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        print(f"[JSON] Summary written: {args.json_report}")
 
 
 if __name__ == "__main__":
