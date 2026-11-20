@@ -12,7 +12,16 @@ It is designed for **containerized FileNet deployments** (e.g., Cloud Pak for Bu
 
 ---
 
-## ✨ What's new in 1.1.0
+## ✨ What's new in 1.2.0
+
+- **Better grouping of similar messages** – the fallback family masks quoted values, numbers of any length, hex values, IP addresses, host names, file paths, durations and timestamps. Messages that differ only in such values become one family; in a fresh Content Cortex 26 sandbox the 53 warnings `Missing locale-specific translations for key '…'` are now 1 family instead of 53 (68 entries: 56 → 4 families). Values that tell different problems apart stay visible: LDAP/SQL/HTTP result codes (`error code 32`), vendor message IDs (`ORA-00001`, `CWWKS1100A`) and upper-case states (`SUSPENDED`).
+- **Variants, sample values, first/last seen** per family in Markdown, HTML, PDF and `summary.csv` (new last columns `variants`, `sample_values`, `first_seen`, `last_seen`) – e.g. the concrete translation keys of the merged warning.
+- **Custom rules without code changes** – `--rules rules.json|rules.yaml` maps regular expressions to family names; they are checked before the built-in rules. Example: [`examples/rules.yaml`](./examples/rules.yaml) / [`examples/rules.json`](./examples/rules.json).
+- **JSON summary** – `--json summary.json` writes families with count, level, first/last seen, variants and sample values for monitoring or CI.
+
+See [CHANGELOG.md](./CHANGELOG.md) for details.
+
+## What's new in 1.1.0
 
 - **IBM Content Cortex 26 support** – verified against `ce_system*.log` files of a Content Cortex 26.0.1 (IF001) CPE container. The log line format is unchanged; the CPE file header is now recognized explicitly, and every run prints parse statistics (entries, header, continuation and unparsed lines) so format changes become visible.
 - **Multi-line entries** – stack traces and other continuation lines are attached to the preceding entry. The examples in Markdown, PDF and HTML show the first lines of the stack trace (`--stack-lines`, default 5); `raw_errors.csv` and `examples.csv` have a new last column `stacktrace`.
@@ -20,8 +29,6 @@ It is designed for **containerized FileNet deployments** (e.g., Cloud Pak for Bu
 - **Docker as log source** – `--docker-container <name>` copies only the matching logs out of a running local container (e.g. the `cpe` container of a container-demo setup).
 - **pip-installable** – `pyproject.toml` with the command `cpe-loganalyzer`; Python 3.11+.
 - **Fixes** – `--until` now counts back from now (as documented); HTML and PDF reports escape log content; the fixed rules for `FNRCE0043E`/`FNRCE0066E` match the codes again.
-
-See [CHANGELOG.md](./CHANGELOG.md) for details.
 
 ---
 
@@ -43,6 +50,12 @@ or directly from GitHub:
 
 ```bash
 pip install git+https://github.com/mod242/cpe-loganalyzer.git
+```
+
+YAML rule files (`--rules rules.yaml`) need PyYAML, which is optional:
+
+```bash
+pip install ".[yaml]"
 ```
 
 Running the script without installing it still works:
@@ -218,7 +231,7 @@ The generated PDF includes:
 - Title page with timestamp (and optional logo)
 - **Top error families** (wrapped labels)
 - **Error count per day/hour**
-- **Consolidated error table**
+- **Consolidated error table** (with variants, sample values, first/last seen)
 - **Example log messages per family** (with the first lines of the stack trace)
 
 **Charts included:**
@@ -270,9 +283,118 @@ The HTML report provides a modern, interactive web-based view with:
 
 Each WARN/ERROR entry is assigned to a family in this order:
 
-1. Fixed rules on the first line of the entry (e.g. `WSIAuthenticatorImpl login exception`, `checkNameCollision / FNRCE0043E`, `getContent failures`).
-2. The first specific FileNet code `FNRCEnnnnE`/`FNRCEnnnnW` in the message, otherwise in the stack trace. The family is named after the code, plus the symbolic name if it follows the code: `FNRCE0051E (E_OBJECT_NOT_FOUND)`. The generic category code `FNRCE0000x` of the log column is ignored.
-3. Otherwise the message text with GUIDs, IDs and long numbers masked.
+1. Custom rules from `--rules` (first matching rule wins), see below.
+2. Fixed rules on the first line of the entry (e.g. `WSIAuthenticatorImpl login exception`, `checkNameCollision / FNRCE0043E`, `getContent failures`).
+3. The first specific FileNet code `FNRCEnnnnE`/`FNRCEnnnnW` in the message, otherwise in the stack trace. The family is named after the code, plus the symbolic name if it follows the code: `FNRCE0051E (E_OBJECT_NOT_FOUND)`. The generic category code `FNRCE0000x` of the log column is ignored.
+4. Otherwise the first line of the message with variable parts replaced by placeholders (cut to 140 characters):
+
+| Placeholder | Replaces | Example |
+|-------------|----------|---------|
+| `'{STR}'`, `"{STR}"` | values in single or double quotes (apostrophes as in `can't` are not quotes) | `key 'PROP_X_DESC'` → `key '{STR}'` |
+| `{GUID}` | GUIDs | `{F79D75DA-…}` → `{{GUID}}` |
+| `{HOST}` | host names in URLs, after `host [`/`host=`/`hostname:`, and fully qualified names with a common TLD (Java package names are left alone) | `ldap://ldap01:389` → `ldap://{HOST}:{NUM}` |
+| `{IP}` | IPv4 (with optional port) and IPv6 addresses | `192.0.2.10:636` → `{IP}` |
+| `{PATH}` | Unix, Windows and UNC paths | `/opt/ibm/…/ce_system0.log` → `{PATH}` |
+| `{TIME}` | dates and times | `2026-03-04T06:00:00` → `{TIME}` |
+| `{DUR}` | durations | `123 ms`, `2.5 seconds`, `5s` → `{DUR}` |
+| `{HEX}` | `0x…`, hash codes after `@`, hex strings of 8+ characters with letters and digits | `0x7f3a2b10` → `{HEX}` |
+| `{ID}` | upper-case tokens of 8+ characters with letters and digits | `DT502929` → `{ID}` |
+| `{NUM}` | other numbers of any length, including dotted versions | `154352`, `26.0.1.0` → `{NUM}` |
+
+Not masked, because they distinguish messages that mean different things:
+
+- result codes with up to 5 digits after `error code`, `code`, `error`, `rc`, `status`, `HTTP`, `SQLCODE`, `SQLSTATE`, `errno` and the Active Directory sub code after `AcceptSecurityContext error, data` (`LDAP: error code 12` and `LDAP: error code 32` stay two families),
+- message IDs such as `FNRCE0000E`, `CWWKS1100A`, `SQL0911N` and codes with a letter prefix and hyphen such as `ORA-00001`,
+- upper-case words without digits (`SUSPENDED`, `STOPPING`), numbers glued to words (`PEPrimary1`, `IF001`) and inner class numbers (`Worker$2`).
+
+Per family the reports show the number of **variants** (distinct message texts), up to three **sample values** of the masked positions that differ between the messages (constant values are left out; several positions are joined with ` / `), and the timestamps **first seen** / **last seen**.
+
+> Family names of the fallback path changed in 1.2.0 (more placeholders). Compare per-family time series across versions with that in mind.
+
+### Grouping and JSON options
+
+| Option | Description |
+|--------|--------------|
+| `--rules FILE` | Custom family rules (JSON; YAML with PyYAML installed), checked before the built-in rules |
+| `--json FILE` | Write a machine-readable JSON summary |
+
+#### Custom rules (`--rules`)
+
+A rules file is a list of regular expressions (Python syntax, searched in the first line of an entry) with the family name to use. Rules are checked top to bottom; the first match wins. The family name can reference groups of the pattern with `\1` or `\g<name>`. Optional keys: `ignore_case` (default `false`) and `comment`.
+
+```yaml
+# examples/rules.yaml
+rules:
+  - pattern: 'buildNewObjectStoreCache: cache reloaded in transaction'
+    family: 'ObjectStoreCache reloaded in transaction (MCHE)'
+  - pattern: 'LDAP: error code 49 .*AcceptSecurityContext error, data (\w+)'
+    family: 'LDAP error code 49 (AD bind failed, data \1)'
+  - pattern: 'LDAP: error code (\d+)'
+    family: 'LDAP error code \1'
+```
+
+The same as JSON (no extra package needed; note the doubled backslashes):
+
+```json
+{
+  "rules": [
+    {"pattern": "buildNewObjectStoreCache: cache reloaded in transaction",
+     "family": "ObjectStoreCache reloaded in transaction (MCHE)"},
+    {"pattern": "LDAP: error code (\\d+)", "family": "LDAP error code \\1"}
+  ]
+}
+```
+
+```bash
+python filenet_cpe_log_analyzer.py ./cpe-logs --pattern "ce_system*.log" \
+  --rules examples/rules.json --outdir ./results
+```
+
+An invalid file (JSON/YAML syntax, regular expression, unknown key, reference to a missing group) stops the run with a message naming the rule. `.yaml`/`.yml` files without PyYAML installed stop with a hint to install it or to use JSON.
+
+#### JSON summary (`--json`)
+
+```bash
+python filenet_cpe_log_analyzer.py ./cpe-logs --pattern "ce_system*.log" --since 24h \
+  --outdir ./results --json ./results/summary.json
+```
+
+Output for the Content Cortex 26 sandbox from above (all available data, no `--since`; only the first family shown):
+
+```json
+{
+  "schema_version": 1,
+  "tool": "cpe-loganalyzer",
+  "version": "1.2.0",
+  "generated_at": "2026-11-20T17:33:05",
+  "time_window": {"since": null, "until": "2026-11-20T17:33:04"},
+  "pattern": "ce_system*.log",
+  "rules_file": null,
+  "parse_stats": {"files": 1, "lines": 137, "entries": 133, "header": 4, "blank": 0,
+                  "continuation": 0, "unparsed": 0, "selected": 68},
+  "totals": {"entries": 68, "families": 4, "levels": {"WARN": 68},
+             "first_seen": "2026-11-18T14:16:36.199", "last_seen": "2026-11-18T14:20:04.301"},
+  "families": [
+    {
+      "family": "Missing locale-specific translations for key '{STR}' for the following locales: kk. Using '{STR}' locale instead.",
+      "count": 53,
+      "level": "WARN",
+      "levels": {"WARN": 53},
+      "first_seen": "2026-11-18T14:16:36.199",
+      "last_seen": "2026-11-18T14:16:36.320",
+      "variants": 53,
+      "sample_values": ["PROP_GroupSearchFilter_DESC", "PROP_TSMMinimumRetention_DESC", "PROP_RetrievalNameExtension_DESC"],
+      "kind": "masked-message"
+    }
+  ]
+}
+```
+
+`families` is sorted by count (descending). `level` is the highest level in the family (`ERROR` before `WARN`), `levels` the count per level. `kind` tells how the family was assigned: `custom-rule`, `builtin-rule`, `fnrce-code` or `masked-message`. Timestamps are in the log's time zone. Example for CI: fail if any ERROR family exists:
+
+```bash
+jq -e '[.families[] | select(.level == "ERROR")] | length == 0' ./results/summary.json
+```
 
 ### PDF options
 
@@ -321,7 +443,7 @@ Each WARN/ERROR entry is assigned to a family in this order:
 | File | Description |
 |------|--------------|
 | `summary_markdown.md` | Markdown summary report |
-| `summary.csv` | Summary of error families and counts |
+| `summary.csv` | Error families: `count`, `family`, `variants`, `sample_values` (separated by ` ; `), `first_seen`, `last_seen` |
 | `examples.csv` | Example log entries per family (last column `stacktrace`) |
 | `raw_errors.csv` | All WARN/ERROR entries (last column `stacktrace`) |
 | `timeseries_overall_daily.csv` | Error count per day |
@@ -330,6 +452,7 @@ Each WARN/ERROR entry is assigned to a family in this order:
 | `timeseries_family_hourly.csv` | Error count per hour per family |
 | `filenet_cpe_report.pdf` | Visual PDF report with charts |
 | `report.html` | Interactive HTML report with embedded charts |
+| `summary.json` | (`--json`) Machine-readable summary for monitoring/CI |
 
 ---
 
@@ -349,7 +472,7 @@ pip install ".[test]"
 pytest
 ```
 
-The tests use small synthetic logs in `tests/data/` (Content Cortex 26 line format, no real host names, users or IDs).
+The tests use small synthetic logs in `tests/data/` (Content Cortex 26 line format, no real host names, users or IDs). The `test` extra includes PyYAML for the YAML rule tests; without it they are skipped.
 
 ---
 
@@ -383,23 +506,28 @@ xdg-open ./results/cpe_analysis.pdf
 ## 📘 Example: Markdown & CSV Results
 
 ### `summary_markdown.md`
+
+Output for a fresh IBM Content Cortex 26 sandbox (68 WARN entries, shortened):
+
 ```markdown
 # Error overview (consolidated)
 
-| Count | Error family |
-|-------|---------------|
-| 850 | WSIAuthenticatorImpl login exception (authentication failures) |
-| 548 | checkNameCollision / FNRCE0043E (E_NOT_UNIQUE) – Name already exists |
-| 10  | getContent failures (content retrieval) |
+| Count | Error family | Variants | Sample values | First seen | Last seen |
+|-------|---------------|----------|---------------|------------|-----------|
+| 53 | Missing locale-specific translations for key '{STR}' for the following locales: kk. Using '{STR}' locale instead. | 53 | `PROP_GroupSearchFilter_DESC`, `PROP_TSMMinimumRetention_DESC`, `PROP_RetrievalNameExtension_DESC` | 2026-11-18T14:16:36.199 | 2026-11-18T14:16:36.320 |
+| 9 | buildNewObjectStoreCache: cache reloaded in transaction. Not updating global | 1 |  | 2026-11-18T14:19:59.560 | 2026-11-18T14:20:02.980 |
+| 5 | LDAP search operation failed: [LDAP: error code 12 - critical extension is not recognized] | 1 |  | 2026-11-18T14:20:04.102 | 2026-11-18T14:20:04.301 |
+| 1 | Initializing default security on P8 domain '{STR}'. Only limited operations will be permitted. | 1 |  | 2026-11-18T14:17:55.838 | 2026-11-18T14:17:55.838 |
 
 ---
 
 ## Example entries per error family
 
-### WSIAuthenticatorImpl login exception (authentication failures)
+### Missing locale-specific translations for key '{STR}' for the following locales: kk. Using '{STR}' locale instead.
+
 | Timestamp | Logfile | Example message |
-|------------|----------|----------------|
-| 2025-10-14T04:50:18.885 | ce_system0-cpe08.log | [WSIAuthenticatorImpl] login exception: Unable ... |
+|-----------|---------|------------------|
+| 2026-11-18T14:16:36.199 | ce_system0.log | Missing locale-specific translations for key 'PROP_GroupSearchFilter_DESC' for the following locales: kk.  Using 'en-us' locale instead. |
 ```
 
 ---

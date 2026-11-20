@@ -14,8 +14,9 @@ Features:
   "YYYY-MM-DDTHH:MM:SS.mmm <thread> <sub> <category> - LEVEL message".
   Continuation lines (stack traces etc.) are attached to the preceding entry.
 - Relative time filters: --since/--until (e.g., "24h", "2d6h", "1w2d", "3h30m", "0h"/"now").
-- Consolidated error families (fixed rules + automatic FNRCE error codes)
-  + examples + time series (daily/hourly, overall & per family).
+- Consolidated error families (custom rules via --rules, fixed rules, automatic
+  FNRCE error codes, masked message text) with variants, sample values and
+  first/last seen + examples + time series (daily/hourly, overall & per family).
 - PDF report with charts (top error families, daily and hourly time series).
 - Landscape PDF layout via --pdf-landscape; dynamic table widths; wrapped labels; aspect-ratio image embedding.
 
@@ -30,9 +31,10 @@ Outputs:
   timeseries_family_hourly.csv
   (optional) PDF report
   (optional) HTML report
+  (optional) JSON summary (--json)
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import csv

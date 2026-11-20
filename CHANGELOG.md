@@ -4,7 +4,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] – unreleased
+## [1.2.0] – unreleased
+
+### Added
+- **Variants per family**: Markdown, HTML, PDF and `summary.csv` show the number
+  of distinct message texts (`variants`), up to three sample values of the
+  masked positions that differ between the messages (`sample_values`, e.g. the
+  concrete translation keys; constant values are left out) and `first_seen` /
+  `last_seen`. `summary.csv` has these as new last columns
+  (`count,family,variants,sample_values,first_seen,last_seen`; sample values
+  separated by ` ; `).
+- **Custom rules**: `--rules FILE` loads a list of `{pattern, family}` rules
+  (regular expression on the first line of an entry → family name, optional
+  `ignore_case` and `comment`). They are checked before the built-in rules;
+  the first match wins. The family name may reference groups (`\1`,
+  `\g<name>`). JSON works without extra packages; `.yaml`/`.yml` needs PyYAML
+  (new optional extra `cpe-loganalyzer[yaml]`). Invalid files stop the run with
+  a message naming the rule. Example files: `examples/rules.yaml`,
+  `examples/rules.json` (ObjectStoreCache warning, LDAP `error code nn`,
+  Active Directory bind failures by `data` sub code).
+- **JSON summary**: `--json FILE` writes a machine-readable summary
+  (`schema_version` 1): time window, parse statistics, totals, and per family
+  count, highest level and count per level, first/last seen, variants, sample
+  values and how the family was assigned (`custom-rule`, `builtin-rule`,
+  `fnrce-code`, `masked-message`).
+- Console line `[Families] N families for M entries (…)` on every run.
+
+### Changed
+- **More generic masking in the fallback family** (entries without a rule or
+  FNRCE code). Masked now: values in single or double quotes (`{STR}`),
+  numbers of any length (`{NUM}`, before: 6+ digits), hex values (`{HEX}`),
+  IPv4/IPv6 addresses (`{IP}`), host names (`{HOST}`), Unix/Windows/UNC paths
+  (`{PATH}`), durations such as `123 ms` (`{DUR}`) and dates/times (`{TIME}`).
+  In a fresh Content Cortex 26 sandbox this reduces 68 entries from 56 to 4
+  families (the 53 `Missing locale-specific translations for key '…'`
+  warnings become one family).
+  Deliberately not masked, because they distinguish different problems:
+  result codes up to 5 digits after `error code`, `code`, `error`, `rc`,
+  `status`, `HTTP`, `SQLCODE`, `SQLSTATE`, `errno` and the Active Directory sub
+  code after `AcceptSecurityContext error, data`; message IDs (`CWWKS1100A`,
+  `SQL0911N`) and hyphenated vendor codes (`ORA-00001`); upper-case words
+  without digits (`SUSPENDED`); dotted versions are `{NUM}`, not `{IP}`.
+  **Family names of the fallback path therefore differ from 1.1.0.**
+- `{ID}` now requires letters and digits (8+ characters). Before, any
+  upper-case word of 8+ letters (e.g. a state such as `STOPPING`) and any
+  8+ digit number was masked as `{ID}`; numbers are now `{NUM}`.
+- Markdown summary table: pipes in family names are escaped (before, a `|` in a
+  fallback family broke the table row).
+- `normalize_message()` accepts optional custom rules; the new
+  `classify_message()` also returns how the family was assigned.
+
+## [1.1.0] – 2026-11-18
 
 ### Added
 - Support for **IBM Content Cortex 26**: verified against `ce_system*.log` of a
