@@ -36,6 +36,7 @@ __version__ = "1.1.0"
 
 import argparse
 import csv
+import functools
 import glob
 import html
 import json
@@ -111,43 +112,276 @@ def find_fnrce_code(texts) -> Optional[str]:
     return None
 
 
-def normalize_message(msg: str, continuation: Optional[List[str]] = None) -> str:
+# ---------- Masking of variable message parts ----------
+#
+# The fallback family of an entry is its first line with variable parts
+# replaced by placeholders. All patterns are combined into one regex that is
+# scanned left to right; at the same start position the earlier alternative
+# wins (e.g. a GUID inside quotes is part of the quoted value).
+#
+# Deliberately NOT masked (they distinguish messages that mean different things):
+#   - short numbers after an error/status keyword ("LDAP: error code 32",
+#     "SQLCODE=-911", "HTTP status 500", "AcceptSecurityContext error, data 775")
+#   - product message IDs (FNRCE0051E, CWWKS1100A, SQL0911N, J2CA0045E)
+#   - numbers glued to a code prefix with a hyphen (ORA-00001)
+#   - upper-case words without digits (STARTING vs. STOPPING)
+#   - bracketed names ([PEPrimary1]), numbers glued to words (IF001) and
+#     inner class numbers (Foo$2)
+
+_HOST_TLDS = (
+    "com|net|org|edu|gov|mil|int|info|biz|io|cloud|de|at|ch|eu|uk|fr|nl|be|it|es|"
+    "pl|se|dk|no|fi|us|ca|local|localdomain|lan|internal|intranet|intra|corp|home|"
+    "example|test|invalid|arpa"
+)
+# First labels that indicate a Java package rather than a host name.
+_JAVA_PACKAGE_ROOTS = {"com", "org", "net", "java", "javax", "jakarta", "sun", "io", "de"}
+
+_MASK_RE = re.compile(r"""
+      (?P<guid>\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b)
+    | (?<![\w'])'(?P<sq>[^'\n]{0,200})'(?![\w'])
+    | (?<![\w"])"(?P<dq>[^"\n]{0,200})"(?![\w"])
+    | (?<=://)(?P<urlhost>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.\-_]*[A-Za-z0-9])?)
+    | (?P<hostkw>\b(?i:host(?:name)?)(?:\s*[=:]\s*|\s*\[))
+      (?P<hostctx>[A-Za-z0-9](?:[A-Za-z0-9.\-_]*[A-Za-z0-9])?)
+    | (?P<fqdn>(?<![\w.\-@/])(?i:(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+(?:%s))(?![\w\-]|\.\w))
+    | (?P<winpath>(?<!\w)[A-Za-z]:\\[^\s'"<>|]*|\\\\[\w.$\-]+\\[^\s'"<>|]*)
+    | (?P<path>(?<![\w/.:~\-])(?:~|\.\.?)?/(?:[\w.\-@+$]+/)+[\w.\-@+$]*)
+    | (?P<ipv4>(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?!\w|\.\w))
+    | (?P<ipv6>(?<![\w:])(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}
+                          |(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?
+                          |::[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)(?![\w:]))
+    | (?P<time>(?<![\w.])\d{4}-\d{2}-\d{2}(?:[T\ ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?(?!\w)
+              |(?<![\w:.])\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?![\w:]))
+    | (?P<dur>(?<![\w.])\d+(?:[.,]\d+)?
+              (?:\ ?(?:ms|msec|millis(?:econds?)?|µs|us|ns|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?)(?!\w)
+                |[smhd](?=[\s,;)\]]|\.(?!\w)|$)))
+    | (?P<msgid>\b[A-Z][A-Z0-9]{2,5}\d{3,5}[A-Z]\b)
+    | (?P<hex>\b0[xX][0-9A-Fa-f]+\b
+             |(?<=@)[0-9A-Fa-f]{4,}\b
+             |\b(?=[0-9A-Fa-f]*[A-Fa-f])(?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{8,}\b)
+    | (?P<id>\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b)
+    | (?P<num>(?<![\w.$])(?<![A-Za-z]-)\d+(?:[.,]\d+)*(?!\w|[.,]\d))
+""" % _HOST_TLDS, re.VERBOSE)
+
+
+# Short numbers right after one of these keywords are error/status codes and stay unmasked.
+_CODE_KEYWORD_BEFORE_RE = re.compile(
+    r"(?i)(?:\berror\s*code|\berrorcode|\breturn\s*code|\breason\s*code|\brc|\bsqlcode|\bsqlstate"
+    r"|\berrno|\berror|\bcode|\bstatus|\bhttp|AcceptSecurityContext\s+error,\s*data)\s*[:=#]?\s*-?$"
+)
+# A dotted quad is a version, not an IP address, after a version keyword or a
+# slash ("Liberty/26.0.0.10") or when a build suffix follows ("5.0.0.11-156").
+_VERSION_BEFORE_RE = re.compile(
+    r"(?i)(?:\b(?:version|ver|release|build|level|fix\s*pack|v|java|jdk|jre|startup)\s*[:=]?\s*|/)$")
+_VERSION_AFTER_RE = re.compile(r"[-+_]\w")
+MAX_KEPT_CODE_DIGITS = 5
+
+# Maximum length of a fallback family name (as in 1.0).
+MAX_FAMILY_LEN = 140
+
+
+@functools.lru_cache(maxsize=65536)
+def mask_message(msg: str):
     """
-    Heuristics to consolidate similar messages into 'families'.
+    Replace variable parts of a message by placeholders.
+
+    Returns (template, values): the masked text (whitespace collapsed) and the
+    tuple of replaced original values in order of appearance. Placeholders:
+    {GUID} {STR} {HOST} {PATH} {IP} {TIME} {DUR} {HEX} {ID} {NUM}.
+    """
+    text = re.sub(r"\s+", " ", msg).strip()
+    values: List[str] = []
+
+    def repl(m: "re.Match") -> str:
+        start = m.start()
+        if m.group("guid") is not None:
+            values.append(m.group("guid"))
+            return "{GUID}"
+        if m.group("sq") is not None:
+            values.append(m.group("sq"))
+            return "'{STR}'"
+        if m.group("dq") is not None:
+            values.append(m.group("dq"))
+            return '"{STR}"'
+        if m.group("urlhost") is not None:
+            values.append(m.group("urlhost"))
+            return "{HOST}"
+        if m.group("hostctx") is not None:
+            values.append(m.group("hostctx"))
+            return m.group("hostkw") + "{HOST}"
+        if m.group("fqdn") is not None:
+            host = m.group("fqdn")
+            if host.split(".", 1)[0].lower() in _JAVA_PACKAGE_ROOTS:
+                return host  # Java package / class name, not a host
+            values.append(host)
+            return "{HOST}"
+        if m.group("winpath") is not None or m.group("path") is not None:
+            values.append(m.group(0))
+            return "{PATH}"
+        if m.group("ipv4") is not None:
+            ip = m.group("ipv4")
+            octets = ip.split(":", 1)[0].split(".")
+            if (all(int(o) <= 255 for o in octets)
+                    and not _VERSION_BEFORE_RE.search(text, max(0, start - 64), start)
+                    and not _VERSION_AFTER_RE.match(text, m.end())):
+                values.append(ip)
+                return "{IP}"
+            # version number such as 26.0.1.0
+            values.append(ip)
+            return "{NUM}"
+        if m.group("ipv6") is not None:
+            ip = m.group("ipv6")
+            if any(c.isdigit() for c in ip):
+                values.append(ip)
+                return "{IP}"
+            return ip
+        if m.group("time") is not None:
+            values.append(m.group("time"))
+            return "{TIME}"
+        if m.group("dur") is not None:
+            values.append(m.group("dur"))
+            return "{DUR}"
+        if m.group("msgid") is not None:
+            return m.group("msgid")
+        if m.group("hex") is not None:
+            values.append(m.group("hex"))
+            return "{HEX}"
+        if m.group("id") is not None:
+            values.append(m.group("id"))
+            return "{ID}"
+        num = m.group("num")
+        if (len(num) <= MAX_KEPT_CODE_DIGITS and num.isdigit()
+                and _CODE_KEYWORD_BEFORE_RE.search(text, max(0, start - 64), start)):
+            return num
+        values.append(num)
+        return "{NUM}"
+
+    template = _MASK_RE.sub(repl, text)
+    return template, tuple(values)
+
+
+# ---------- Family assignment ----------
+
+# Kinds of family assignment (summary field "kind").
+KIND_BUILTIN = "builtin-rule"
+KIND_FNRCE = "fnrce-code"
+KIND_MASKED = "masked-message"
+
+
+def classify_message(msg: str, continuation: Optional[List[str]] = None):
+    """
+    Assign an entry to a family. Returns (family, kind).
 
     Order:
       1. Fixed rules on the first line of the entry (unchanged from 1.0).
       2. Specific FNRCE error code (FNRCEnnnnE/W) in the message, then in the
          continuation lines (stack trace) -> family named after the code.
-      3. Fallback: the normalized message text (IDs/GUIDs/numbers masked).
+      3. Fallback: the message text with variable parts masked (mask_message).
     """
-    m = msg
-    m = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "{GUID}", m)
-    m = re.sub(r"\b[A-Z0-9]{8,}\b", "{ID}", m)
-    m = re.sub(r"\b\d{6,}\b", "{NUM}", m)
-    m = re.sub(r"\s+", " ", m).strip()
+    m = mask_message(msg)[0]
 
     def has(needle: str) -> bool:
-        # Check the normalized text (as in 1.0) and the original text, because
-        # the {ID} masking above also replaces FNRCE codes such as FNRCE0043E.
+        # Check the masked text (as in 1.0) and the original text, because
+        # the masking may replace parts of a needle.
         return needle in m or needle in msg
 
     if has("[WSIAuthenticatorImpl] login exception") or has("WSIAuthenticatorImpl"):
-        return "WSIAuthenticatorImpl login exception (authentication failures)"
+        return "WSIAuthenticatorImpl login exception (authentication failures)", KIND_BUILTIN
     if has("MethodName: checkNameCollision") or has("E_NOT_UNIQUE") or has("FNRCE0043E"):
-        return "checkNameCollision / FNRCE0043E (E_NOT_UNIQUE) – Name already exists"
+        return "checkNameCollision / FNRCE0043E (E_NOT_UNIQUE) – Name already exists", KIND_BUILTIN
     if has("MethodName: getContent"):
-        return "getContent failures (content retrieval)"
+        return "getContent failures (content retrieval)", KIND_BUILTIN
     if has("FNRCE0066E") or has("E_UNEXPECTED_EXCEPTION"):
-        return "FNRCE0066E (E_UNEXPECTED_EXCEPTION) – unexpected error"
+        return "FNRCE0066E (E_UNEXPECTED_EXCEPTION) – unexpected error", KIND_BUILTIN
     if has("TTLStreamReaper"):
-        return "TTLStreamReaper scheduling issue"
+        return "TTLStreamReaper scheduling issue", KIND_BUILTIN
 
     code_family = find_fnrce_code([msg]) or find_fnrce_code(continuation or [])
     if code_family:
-        return code_family
+        return code_family, KIND_FNRCE
 
-    return (m[:140] + "…") if len(m) > 140 else m
+    return ((m[:MAX_FAMILY_LEN] + "…") if len(m) > MAX_FAMILY_LEN else m), KIND_MASKED
+
+
+def normalize_message(msg: str, continuation: Optional[List[str]] = None) -> str:
+    """Family name of an entry (see classify_message)."""
+    return classify_message(msg, continuation)[0]
+
+
+# ---------- Per-family statistics ----------
+
+MAX_SAMPLE_VALUES = 3
+MAX_SAMPLE_VALUE_LEN = 80
+_LEVEL_ORDER = {"ERROR": 2, "WARN": 1}
+
+
+def variant_samples(messages: List[str], limit: int = MAX_SAMPLE_VALUES) -> List[str]:
+    """
+    Up to `limit` distinct example values of the masked parts that differ
+    between the messages of one family (e.g. the concrete keys of
+    "Missing locale-specific translations for key '{STR}'").
+
+    Masked positions with the same value in all messages of a template are
+    left out. Several varying positions are joined with " / ".
+    """
+    by_template: Dict[str, List[tuple]] = defaultdict(list)
+    order: List[tuple] = []
+    for msg in messages:
+        tpl, vals = mask_message(msg)
+        by_template[tpl].append(vals)
+        order.append((tpl, vals))
+
+    varying: Dict[str, List[int]] = {}
+    for tpl, tuples in by_template.items():
+        width = min(len(t) for t in tuples)
+        varying[tpl] = [i for i in range(width) if len({t[i] for t in tuples}) > 1]
+
+    samples: List[str] = []
+    seen = set()
+    for tpl, vals in order:
+        idx = varying[tpl]
+        if not idx:
+            continue
+        sample = " / ".join(vals[i] for i in idx)
+        if sample in seen:
+            continue
+        seen.add(sample)
+        if len(sample) > MAX_SAMPLE_VALUE_LEN:
+            # Cut in the middle: values often differ only at the end (keys, file names).
+            head = (MAX_SAMPLE_VALUE_LEN - 1) // 2
+            tail = MAX_SAMPLE_VALUE_LEN - 1 - head
+            sample = sample[:head] + "…" + sample[-tail:]
+        samples.append(sample)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def summarize_families(families: Dict[str, List[Dict[str, Any]]],
+                       kinds: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """
+    One summary row per family, sorted by count (descending, stable):
+      family, count, variants (distinct message texts), sample_values,
+      first_seen, last_seen, level (highest), levels (count per level), kind.
+    """
+    summary = []
+    for fam, items in families.items():
+        ordered = sorted(items, key=lambda r: r["timestamp"])
+        messages = [re.sub(r"\s+", " ", r["message"]).strip() for r in ordered]
+        levels = Counter(r.get("level", "") for r in items)
+        summary.append({
+            "family": fam,
+            "count": len(items),
+            "variants": len(set(messages)),
+            "sample_values": variant_samples(messages),
+            "first_seen": ordered[0]["timestamp"] if ordered else "",
+            "last_seen": ordered[-1]["timestamp"] if ordered else "",
+            "level": max(levels, key=lambda lv: _LEVEL_ORDER.get(lv, 0)) if levels else "",
+            "levels": dict(sorted(levels.items())),
+            "kind": (kinds or {}).get(fam, ""),
+        })
+    summary.sort(key=lambda x: x["count"], reverse=True)
+    return summary
 
 
 def parse_relative_delta(expr: Optional[str]):
@@ -791,14 +1025,30 @@ def generate_pdf_report(
     elements.append(Paragraph("Consolidated Error Families", styles["Heading2"]))
     from reportlab.platypus import Paragraph as RLParagraph
     body = styles["BodyText"]; body.fontSize = 9
-    data = [["Count", "Error Family"]]
+    from reportlab.lib.styles import ParagraphStyle
+    small = ParagraphStyle("SummarySmall", parent=body, fontSize=7.5, leading=9)
+
+    def _ts(ts: str) -> str:
+        # "2026-11-18T14:16:36.199" -> wraps after the date in narrow columns
+        return html.escape((ts or "").replace("T", " "), quote=False)
+
+    data: List[List[Any]] = [["Count", "Error Family", "Variants", "Sample values", "First seen", "Last seen"]]
     for s in summary:
         fam_para = RLParagraph(html.escape(s["family"], quote=False), body)
-        data.append([s["count"], fam_para])
-    count_col = 80
-    fam_col = max(200, avail_w - count_col)
-    table = Table(data, colWidths=[count_col, fam_col])
+        samples = "<br/>".join(html.escape(v, quote=False) for v in s.get("sample_values") or [])
+        data.append([s["count"], fam_para, s.get("variants", ""), RLParagraph(samples, small),
+                     RLParagraph(_ts(s.get("first_seen", "")), small),
+                     RLParagraph(_ts(s.get("last_seen", "")), small)])
+    count_col = 45
+    variants_col = 50
+    ts_col = 70
+    rest = max(200, avail_w - count_col - variants_col - 2 * ts_col)
+    fam_col = rest * 0.6
+    samples_col = rest - fam_col
+    table = Table(data, colWidths=[count_col, fam_col, variants_col, samples_col, ts_col, ts_col],
+                  repeatRows=1)
     table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.gray),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -1070,6 +1320,19 @@ def generate_html_report(
         .hidden {{
             display: none;
         }}
+        .families-table td.variants {{
+            text-align: right;
+        }}
+        .families-table td.samples {{
+            font-size: 0.85em;
+            min-width: 16em;
+            overflow-wrap: anywhere;
+        }}
+        .families-table td.seen {{
+            font-size: 0.85em;
+            white-space: nowrap;
+            color: #555;
+        }}
         .stacktrace {{
             margin: 6px 0 0 0;
             padding: 6px 8px;
@@ -1130,6 +1393,10 @@ def generate_html_report(
                     <th>Count</th>
                     <th>Error Family</th>
                     <th>Actions</th>
+                    <th>Variants</th>
+                    <th>Sample values</th>
+                    <th>First seen</th>
+                    <th>Last seen</th>
                 </tr>
             </thead>
             <tbody>"""
@@ -1138,6 +1405,7 @@ def generate_html_report(
     for i, family_data in enumerate(summary[:20]):  # Top 20 families
         family_examples = examples_by_family.get(family_data["family"], [])
         has_examples = len(family_examples) > 0
+        samples_html = "<br>".join(f"<code>{esc(v)}</code>" for v in family_data.get("sample_values") or [])
         
         html_content += f"""
                 <tr>
@@ -1146,12 +1414,16 @@ def generate_html_report(
                     <td>
                         {"<button class='toggle-btn' onclick='toggleExamples(" + str(i) + ")'>Show Examples</button>" if has_examples else "No examples"}
                     </td>
+                    <td class="variants">{family_data.get("variants", "")}</td>
+                    <td class="samples">{samples_html}</td>
+                    <td class="seen">{esc(family_data.get("first_seen", ""))}</td>
+                    <td class="seen">{esc(family_data.get("last_seen", ""))}</td>
                 </tr>"""
         
         if has_examples:
             html_content += f"""
                 <tr id="examples-{i}" class="hidden">
-                    <td colspan="3">
+                    <td colspan="7">
                         <div style="padding: 15px; background: #f8f9fa;">
                             <strong>Examples:</strong>"""
             
@@ -1325,6 +1597,21 @@ def _md_cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+def _md_samples(samples: List[str]) -> str:
+    # Code spans keep underscores in keys from turning into emphasis.
+    return ", ".join("`" + _md_cell(s.replace("`", "'")) + "`" for s in samples)
+
+
+SUMMARY_CSV_FIELDS = ["count", "family", "variants", "sample_values", "first_seen", "last_seen"]
+SAMPLE_VALUES_SEPARATOR = " ; "
+
+
+def summary_rows_for_csv(summary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Summary rows with the sample values joined into one text column."""
+    return [{**s, "sample_values": SAMPLE_VALUES_SEPARATOR.join(s.get("sample_values") or [])}
+            for s in summary]
+
+
 def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser(
         prog="cpe-loganalyzer",
@@ -1454,12 +1741,15 @@ def main(argv: Optional[List[str]] = None):
               ["timestamp", "level", "source_file", "message", "stacktrace"])
 
     families: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    kinds: Dict[str, str] = {}
     for r in rows:
-        families[normalize_message(r["message"], r.get("continuation"))].append(r)
+        fam, kind = classify_message(r["message"], r.get("continuation"))
+        families[fam].append(r)
+        kinds.setdefault(fam, kind)
 
-    summary = [{"family": fam, "count": len(items)} for fam, items in families.items()]
-    summary.sort(key=lambda x: x["count"], reverse=True)
-    write_csv(os.path.join(args.outdir, "summary.csv"), summary, ["count", "family"])
+    summary = summarize_families(families, kinds)
+    print(f"[Families] {len(summary)} families for {len(rows)} entries")
+    write_csv(os.path.join(args.outdir, "summary.csv"), summary_rows_for_csv(summary), SUMMARY_CSV_FIELDS)
 
     example_rows = build_example_rows(families, args.examples, args.stack_lines)
     write_csv(os.path.join(args.outdir, "examples.csv"),
@@ -1509,9 +1799,11 @@ def main(argv: Optional[List[str]] = None):
     md_path = os.path.join(args.outdir, "summary_markdown.md")
     with open(md_path, "w", encoding="utf-8") as md:
         md.write("# Error overview (consolidated)\n\n")
-        md.write("| Count | Error family |\n|-------|---------------|\n")
+        md.write("| Count | Error family | Variants | Sample values | First seen | Last seen |\n"
+                 "|-------|---------------|----------|---------------|------------|-----------|\n")
         for row in summary:
-            md.write(f"| {row['count']} | {row['family']} |\n")
+            md.write(f"| {row['count']} | {_md_cell(row['family'])} | {row['variants']} | "
+                     f"{_md_samples(row['sample_values'])} | {row['first_seen']} | {row['last_seen']} |\n")
         md.write("\n---\n\n## Time series (files)\n\n")
         md.write("- `timeseries_overall_daily.csv`\n- `timeseries_overall_hourly.csv`\n")
         md.write("- `timeseries_family_daily.csv`\n- `timeseries_family_hourly.csv`\n\n")
@@ -1573,6 +1865,8 @@ def main(argv: Optional[List[str]] = None):
             time_range=time_range,
             stack_lines=args.stack_lines,
         )
+
+
 
 if __name__ == "__main__":
     main()

@@ -25,9 +25,11 @@ def test_csv_outputs(run_cli):
     outdir = run_cli()
 
     summary = _read_csv(outdir / "summary.csv")
-    assert list(summary[0].keys()) == ["count", "family"]
+    # 1.0 columns unchanged and first; 1.2 columns appended
+    assert list(summary[0].keys()) == ["count", "family", "variants", "sample_values", "first_seen", "last_seen"]
     assert sum(int(r["count"]) for r in summary) == 10
-    assert {"count": "2", "family": "FNRCE0051E (E_OBJECT_NOT_FOUND)"} in summary
+    assert {"count": "2", "family": "FNRCE0051E (E_OBJECT_NOT_FOUND)"}.items() <= next(
+        r for r in summary if r["family"] == "FNRCE0051E (E_OBJECT_NOT_FOUND)").items()
 
     raw = _read_csv(outdir / "raw_errors.csv")
     # 1.0 columns unchanged and first; stacktrace appended
